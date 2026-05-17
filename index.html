@@ -1,0 +1,1065 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, viewport-fit=cover">
+
+  <title>Trace</title>
+  <script src="qrcode.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- (Telegram security gate removed — public website) -->
+
+
+<div class="wrap">
+
+  <!-- Header -->
+  <div class="header"><span class="header-corner tl"></span><span class="header-corner br"></span>
+    <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle light/dark mode">☀</button>
+    <button class="lang-toggle" id="langToggle" onclick="toggleLang()" title="Switch language / تغییر زبان">FA</button>
+    <div class="header-tag" data-i18n="header_tag">⬡ PROXY CONFIGURATION SUITE</div>
+    <h1 data-text="Trace">Tr<span style="color:var(--accent2)">a</span>ce</h1>
+    <p class="sub" data-i18n="header_sub">Generate · Parse · Manage · Profile VLESS configurations</p>
+    <div class="creator" data-i18n-html="header_creator">Created by <a href="https://t.me/Blackkcore" target="_blank" rel="noopener">@Blackkcore</a> · All rights reserved</div>
+  </div>
+
+  <!-- Nav tabs -->
+  <div class="nav-tabs">
+    <button class="ntab active" id="nt-gen"      onclick="navTab('gen')" data-i18n="tab_generate">⚡ Generate</button>
+    <button class="ntab"        id="nt-profiles"  onclick="navTab('profiles')" data-i18n="tab_profiles">📁 Profiles</button>
+    <button class="ntab"        id="nt-bulk"      onclick="navTab('bulk')" data-i18n="tab_bulk">📥 Bulk</button>
+    <button class="ntab"        id="nt-tools"     onclick="navTab('tools')" data-i18n="tab_tools">🔧 Tools</button>
+    <button class="ntab"        id="nt-uuids"     onclick="navTab('uuids')" data-i18n="tab_saved">🗄 Saved Data</button>
+  </div>
+
+  <!-- ══ TAB: GENERATE ══ -->
+  <div class="tab-panel active" id="tp-gen">
+
+    <div class="mode-toggle">
+      <button class="mbtn active" id="btnSimple" onclick="setMode('simple')" data-i18n="mode_simple">⚡ Simple Mode</button>
+      <button class="mbtn" id="btnAdv" onclick="setMode('advanced')" data-i18n="mode_advanced">⚙ Advanced Mode</button>
+    </div>
+
+    <!-- SIMPLE MODE -->
+    <div id="pSimple">
+      <div class="notice" data-i18n-html="simple_notice">
+        💡 Paste any <code>vless://</code> link to auto-load settings. Add multiple IPs or SNIs (one per line) to batch-generate. Press <code>Ctrl+Enter</code> to generate instantly.
+      </div>
+
+      <div class="card">
+        <div class="ctitle" data-i18n="simple_paste_title">Paste your VLESS link</div>
+        <textarea id="sUri" rows="3" style="font-size:11px;color:var(--accent);" placeholder="vless://uuid@host:443?security=tls&amp;type=xhttp&amp;...#Remark"></textarea>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button onclick="simpleParse()" data-i18n="btn_autodetect">▶ Auto-detect &amp; Load</button>
+          <button class="ghost sm" onclick="clearSimple()" data-i18n="btn_clear">✕ Clear</button>
+        </div>
+        <div id="sStatus"></div>
+      </div>
+
+      <div id="sEditor" style="display:none;">
+        <div class="card">
+          <div class="ctitle"><span data-i18n="simple_edit_title">Edit settings</span> &nbsp;<span id="sTypeBadge" class="badge" style="text-transform:none;letter-spacing:0;font-size:10px;"></span></div>
+          <div class="sfields">
+            <div class="sf">
+              <label data-i18n="label_uuid">UUID</label>
+              <div style="display:flex;gap:5px;">
+                <input id="s_uuid" autocomplete="off" placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx">
+                <button class="icn" onclick="newUUID('s_uuid')" title="Generate">↻</button>
+                <button class="icn" onclick="pickUUID('s_uuid')" title="Pick saved">★</button>
+              </div>
+              <div class="err-msg" id="err_s_uuid" data-i18n="err_invalid_uuid">Invalid UUID format</div>
+            </div>
+
+            <div class="sf">
+              <label data-i18n="label_port">Port</label>
+              <input id="s_port" placeholder="443" type="number" min="1" max="65535">
+            </div>
+
+            <div class="sf full">
+              <label><span data-i18n="label_ips">IPs / Hosts — one per line</span> &nbsp;<span style="font-size:9px;color:var(--muted);font-weight:400;" data-i18n="label_ips_hint">supports ranges: 1.2.3.1-50 · 1.2.3.0/24</span></label>
+              <textarea id="s_ip" rows="3" placeholder="1.2.3.4&#10;5.6.7.8&#10;1.2.3.1-50&#10;104.16.0.0/20" oninput="simpleLiveCount()"></textarea>
+              <div style="margin-top:5px;display:flex;gap:5px;flex-wrap:wrap;">
+                <button class="ghost sm" onclick="expandSimpleIPs()" title="Expand ranges" data-i18n="btn_expand">⤢ Expand</button>
+                <button class="ghost sm" onclick="saveIPList('s_ip')" title="Save IPs" data-i18n="btn_save_ips">★ Save</button>
+                <button class="ghost sm" onclick="pickIPList('s_ip')" title="Load IPs" data-i18n="btn_load_ips">★ Load</button>
+              </div>
+            </div>
+
+            <div class="sf full">
+              <label data-i18n="label_sni">SNI — one per line (leave blank to skip)</label>
+              <textarea id="s_sni" rows="3" placeholder="cdn.example.com&#10;sub.domain.com" oninput="simpleLiveCount()"></textarea>
+              <div class="hint" id="s_liveCount" style="margin-top:4px;"></div>
+              <div style="margin-top:5px;display:flex;gap:5px;flex-wrap:wrap;">
+                <button class="ghost sm" onclick="saveSNIList('s_sni')" title="Save SNIs" data-i18n="btn_save_snis">★ Save SNIs</button>
+                <button class="ghost sm" onclick="pickSNIList('s_sni')" title="Load SNIs" data-i18n="btn_load_snis">★ Load SNIs</button>
+              </div>
+            </div>
+
+            <div class="sf full">
+              <div style="display:flex;align-items:center;justify-content:space-between;">
+                <div>
+                  <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;" data-i18n="label_pair_mode">Pair Mode</div>
+                  <div class="hint" style="margin-top:3px;" id="s_pairHint" data-i18n="pair_mode_off">OFF — every IP × every SNI (full matrix)</div>
+                </div>
+                <label class="sw"><input type="checkbox" id="s_pairMode" onchange="togglePairHint('s_pairMode','s_pairHint');_simpleLiveCountNow()"><span class="sl"></span></label>
+              </div>
+            </div>
+
+            <div class="sf"><label data-i18n="label_host">Host header</label><input id="s_host"></div>
+            <div class="sf"><label data-i18n="label_path">Path</label><input id="s_path" value="/"></div>
+
+            <div class="sf">
+              <label data-i18n="label_security">Security</label>
+              <select id="s_security">
+                <option value="tls">tls</option>
+                <option value="reality">reality</option>
+                <option value="none">none</option>
+              </select>
+            </div>
+
+            <div class="sf">
+              <label data-i18n="label_fingerprint">Fingerprint</label>
+              <select id="s_fp">
+                <option value="">— none —</option>
+                <option value="chrome">chrome</option>
+                <option value="firefox">firefox</option>
+                <option value="safari">safari</option>
+                <option value="edge">edge</option>
+                <option value="ios">ios</option>
+                <option value="android">android</option>
+                <option value="random">random</option>
+              </select>
+            </div>
+
+            <div class="sf">
+              <label data-i18n="label_alpn">ALPN</label>
+              <select id="s_alpn">
+                <option value="">— none —</option>
+                <option value="h2,http/1.1">h2,http/1.1</option>
+                <option value="h2">h2</option>
+                <option value="http/1.1">http/1.1</option>
+                <option value="h3">h3</option>
+              </select>
+            </div>
+
+            <div class="sf full">
+              <label data-i18n="label_remark_tpl">Remark Template</label>
+              <input id="s_remark" placeholder="e.g. {prefix}_{ip}_{sni} or just MyServer">
+              <div class="hint" data-i18n="remark_vars_hint">Vars: {prefix} {ip} {sni} {port} {idx}</div>
+            </div>
+
+            <div class="sf">
+              <label data-i18n="label_prefix">Prefix value</label>
+              <input id="s_prefix" placeholder="e.g. CF">
+              <div class="hint" data-i18n="prefix_hint">Fills {prefix} in template above</div>
+            </div>
+
+            <div class="sf" id="sw_mode"><label data-i18n="label_xhttp_mode">xhttp Mode</label>
+              <select id="s_mode">
+                <option value="auto">auto</option>
+                <option value="stream-up">stream-up</option>
+                <option value="stream-down">stream-down</option>
+                <option value="packet-up">packet-up</option>
+              </select>
+            </div>
+            <div class="sf" id="sw_extra"><label data-i18n="label_extra_json">Extra JSON</label><input id="s_extra"></div>
+            <div class="sf" id="sw_grpc" style="display:none;"><label data-i18n="label_grpc_service">gRPC service name</label><input id="s_grpc"></div>
+          </div>
+
+          <div style="margin-top:14px;display:flex;align-items:center;gap:10px;">
+            <label style="margin:0;font-size:11px;color:var(--muted);" data-i18n="label_allow_insecure">Allow Insecure</label>
+            <label class="sw"><input type="checkbox" id="s_insecure"><span class="sl"></span></label>
+          </div>
+        </div>
+
+        <div class="stats" id="sStats" style="display:none;">
+          <div class="stat"><div class="sv" id="sLinks">0</div><div class="sk" data-i18n="stat_links">Links</div></div>
+          <div class="stat"><div class="sv" id="sIPs">0</div><div class="sk" data-i18n="stat_ips">IPs</div></div>
+          <div class="stat"><div class="sv" id="sSNIs">0</div><div class="sk" data-i18n="stat_snis">SNIs</div></div>
+        </div>
+
+        <div class="brow">
+          <button onclick="simpleRegen()" data-i18n="btn_generate">⚡ Generate</button>
+          <button class="ghost sm" onclick="sCopy()" data-i18n="btn_copy">⎘ Copy</button>
+          <button class="ghost sm" onclick="sDl()" data-i18n="btn_dl_txt">↓ TXT</button>
+          <button class="ghost sm" onclick="sDlB64()" data-i18n="btn_dl_b64">↓ Base64</button>
+          <button class="ghost sm" onclick="sQR()" data-i18n="btn_qr">⬛ QR</button>
+          <button class="ghost sm" onclick="saveProfile('simple')" data-i18n="btn_save_profile">💾 Save Profile</button>
+        </div>
+
+        <div class="qrw" id="sQrW">
+          <canvas id="sQr"></canvas>
+          <div class="qr-nav" id="sQrNav" style="display:none;">
+            <button class="ghost sm" onclick="sQrPrev()" data-i18n="btn_prev">‹ Prev</button>
+            <span id="sQrIdx" style="font-size:11px;color:var(--muted);">1 / 1</span>
+            <button class="ghost sm" onclick="sQrNext()" data-i18n="btn_next">Next ›</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:13px;">
+        <div class="ohead">
+          <div style="display:flex;align-items:center;gap:9px;">
+            <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;" data-i18n="label_output">Output</span>
+            <span class="badge gr" id="sBadge">0 links</span>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="icn sm" onclick="sCopy()">⎘</button>
+            <button class="icn sm" onclick="sDlB64()" title="Download Base64">B64</button>
+          </div>
+        </div>
+        <div class="out empty" id="sOut" data-i18n="output_empty">Your generated links will appear here.</div>
+      </div>
+    </div>
+
+    <!-- ADVANCED MODE -->
+    <div id="pAdv" style="display:none;">
+      <div class="tabs2">
+        <button class="tab2 active" onclick="advTab('gen')" data-i18n="adv_tab_generate">Generate</button>
+        <button class="tab2" onclick="advTab('imp')" data-i18n="adv_tab_import">Import / Parse</button>
+        <button class="tab2" onclick="advTab('hist')" data-i18n="adv_tab_history">History</button>
+      </div>
+
+      <div class="pan2 active" id="ap-gen">
+        <div class="stats">
+          <div class="stat"><div class="sv" id="aLinks">0</div><div class="sk" data-i18n="stat_links">Links</div></div>
+          <div class="stat"><div class="sv" id="aIPs">0</div><div class="sk" data-i18n="stat_ips">IPs</div></div>
+          <div class="stat"><div class="sv" id="aSNIs">0</div><div class="sk" data-i18n="stat_snis">SNIs</div></div>
+        </div>
+
+        <div class="card">
+          <div class="ctitle" data-i18n="adv_core_title">Core</div>
+          <div class="g2">
+            <div class="f">
+              <label data-i18n="label_uuid">UUID</label>
+              <div style="display:flex;gap:5px;">
+                <input id="a_uuid" autocomplete="off" placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx">
+                <button class="icn" onclick="newUUID('a_uuid')">↻</button>
+                <button class="icn" onclick="pickUUID('a_uuid')" title="Pick saved">★</button>
+              </div>
+              <div class="err-msg" id="err_a_uuid" data-i18n="err_invalid_uuid">Invalid UUID format</div>
+            </div>
+            <div class="f">
+              <label data-i18n="label_port">Port</label>
+              <input id="a_port" value="443" type="number" min="1" max="65535">
+              <div class="port-presets">
+                <span class="port-preset" onclick="setPort(443)">443</span>
+                <span class="port-preset" onclick="setPort(80)">80</span>
+                <span class="port-preset" onclick="setPort(8443)">8443</span>
+                <span class="port-preset" onclick="setPort(2053)">2053</span>
+                <span class="port-preset" onclick="setPort(2096)">2096</span>
+                <span class="port-preset" onclick="setPort(8080)">8080</span>
+              </div>
+            </div>
+          </div>
+          <div class="f">
+            <label data-i18n="label_remark_tpl">Remark Template</label>
+            <input id="a_prefix" placeholder="{prefix}_{ip}_{sni} or just MyServer_{idx}">
+            <div class="hint" data-i18n="remark_vars_hint">Vars: {prefix} {ip} {sni} {port} {idx}</div>
+          </div>
+          <div class="f">
+            <label data-i18n="label_prefix">Prefix value</label>
+            <input id="a_prefix_val" placeholder="e.g. CF">
+            <div class="hint" data-i18n="prefix_hint">Fills {prefix} in template above</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="ctitle" data-i18n="adv_ips_snis_title">IPs &amp; SNIs</div>
+          <div class="trow">
+            <div><div class="trl" data-i18n="label_ips_hosts">IPs / Hosts</div><div class="trd"><span data-i18n="label_ips_hosts_desc">One per line</span> &nbsp;·&nbsp; <span style="color:var(--accent);font-size:9px;" data-i18n="label_ranges_cidr">supports ranges &amp; CIDR</span></div></div>
+            <label class="sw"><input type="checkbox" id="a_useIps" checked onchange="togPanel('a_ips', this)"><span class="sl"></span></label>
+          </div>
+          <div class="tf open" id="tf-a_ips">
+            <textarea id="a_ips" rows="3" placeholder="1.2.3.4&#10;5.6.7.8&#10;1.2.3.1-254&#10;104.16.0.0/22" oninput="liveCount()"></textarea>
+            <div style="display:flex;align-items:center;gap:6px;margin-top:5px;flex-wrap:wrap;">
+              <div class="hint" id="a_liveCount" style="flex:1;margin:0;min-width:80px;"></div>
+              <button class="ghost sm" onclick="expandAdvIPs()" title="Expand ranges" data-i18n="btn_expand">⤢ Expand</button>
+              <button class="ghost sm" onclick="saveIPList('a_ips')" title="Save IPs" data-i18n="btn_save_ips">★ Save</button>
+              <button class="ghost sm" onclick="pickIPList('a_ips')" title="Load IPs" data-i18n="btn_load_ips">★ Load</button>
+            </div>
+          </div>
+          <div class="trow" style="margin-top:4px;">
+            <div><div class="trl" data-i18n="label_sni_short">SNI</div><div class="trd" id="a_sniDesc" data-i18n="sni_desc">One per line — multiplied with IPs</div></div>
+            <label class="sw"><input type="checkbox" id="a_useSnis" checked onchange="togPanel('a_snis', this)"><span class="sl"></span></label>
+          </div>
+          <div class="tf open" id="tf-a_snis">
+            <textarea id="a_snis" rows="3" placeholder="cdn.example.com" oninput="liveCount()"></textarea>
+            <div style="display:flex;gap:5px;margin-top:5px;flex-wrap:wrap;">
+              <button class="ghost sm" onclick="saveSNIList('a_snis')" title="Save SNIs" data-i18n="btn_save_snis">★ Save SNIs</button>
+              <button class="ghost sm" onclick="pickSNIList('a_snis')" title="Load SNIs" data-i18n="btn_load_snis">★ Load SNIs</button>
+            </div>
+          </div>
+          <div class="trow" style="margin-top:4px;">
+            <div><div class="trl" data-i18n="label_pair_mode">Pair Mode</div><div class="trd" id="a_pairHint" data-i18n="pair_mode_off_adv">OFF — full IP × SNI matrix</div></div>
+            <label class="sw"><input type="checkbox" id="a_pairMode" onchange="togglePairHint('a_pairMode','a_pairHint');_liveCountNow()"><span class="sl"></span></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="ctitle" data-i18n="adv_tls_title">TLS</div>
+          <div class="g2">
+            <div class="f">
+              <label data-i18n="label_security">Security</label>
+              <select id="a_security">
+                <option value="tls">tls</option>
+                <option value="reality">reality</option>
+                <option value="none">none</option>
+              </select>
+            </div>
+            <div class="f">
+              <label data-i18n="label_fingerprint">Fingerprint</label>
+              <select id="a_fp">
+                <option value="">— none —</option>
+                <option value="chrome" selected>chrome</option>
+                <option value="firefox">firefox</option>
+                <option value="safari">safari</option>
+                <option value="edge">edge</option>
+                <option value="ios">ios</option>
+                <option value="android">android</option>
+                <option value="random">random</option>
+              </select>
+            </div>
+          </div>
+          <div class="f">
+            <label data-i18n="label_alpn">ALPN</label>
+            <select id="a_alpn">
+              <option value="">— none —</option>
+              <option value="h2,http/1.1" selected>h2,http/1.1</option>
+              <option value="h2">h2</option>
+              <option value="http/1.1">http/1.1</option>
+              <option value="h3">h3</option>
+            </select>
+          </div>
+          <div class="trow">
+            <div><div class="trl" data-i18n="label_allow_insecure">Allow Insecure</div></div>
+            <label class="sw"><input type="checkbox" id="a_insecure"><span class="sl"></span></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="ctitle" data-i18n="adv_transport_title">Transport</div>
+          <div class="f">
+            <label data-i18n="label_type">Type</label>
+            <div class="pills">
+              <span class="pill" onclick="aType('tcp')">tcp</span>
+              <span class="pill active" onclick="aType('xhttp')">xhttp</span>
+              <span class="pill" onclick="aType('ws')">ws</span>
+              <span class="pill" onclick="aType('grpc')">grpc</span>
+              <span class="pill" onclick="aType('httpupgrade')">httpupgrade</span>
+              <span class="pill" onclick="aType('splithttp')">splithttp</span>
+            </div>
+          </div>
+          <div id="a_tfields" style="margin-top:10px;">
+            <div class="trow" id="a_hostRow">
+              <div><div class="trl" data-i18n="label_host">Host header</div></div>
+              <label class="sw"><input type="checkbox" id="a_useHost" checked onchange="togPanel('a_host', this)"><span class="sl"></span></label>
+            </div>
+            <div class="tf open" id="tf-a_host">
+              <div class="f" style="margin:0;"><input id="a_host" placeholder="cdn.example.com"></div>
+            </div>
+            <div class="trow" id="a_pathRow">
+              <div><div class="trl" data-i18n="label_path">Path</div></div>
+              <label class="sw"><input type="checkbox" id="a_usePath" checked onchange="togPanel('a_path', this)"><span class="sl"></span></label>
+            </div>
+            <div class="tf open" id="tf-a_path">
+              <div class="f" style="margin:0;"><input id="a_path" value="/"></div>
+            </div>
+            <div id="a_xhttpF">
+              <div class="trow">
+                <div><div class="trl" data-i18n="label_xhttp_mode">Mode</div></div>
+                <div style="width:120px;">
+                  <select id="a_mode">
+                    <option value="auto">auto</option>
+                    <option value="stream-up">stream-up</option>
+                    <option value="stream-down">stream-down</option>
+                    <option value="packet-up">packet-up</option>
+                  </select>
+                </div>
+              </div>
+              <div class="trow">
+                <div><div class="trl" data-i18n="label_extra_json">Extra JSON</div></div>
+                <label class="sw"><input type="checkbox" id="a_useExtra" checked onchange="togPanel('a_extra', this)"><span class="sl"></span></label>
+              </div>
+              <div class="tf open" id="tf-a_extra">
+                <div class="f" style="margin:0;"><input id="a_extra" value='{"xPaddingBytes":"100-1000"}'></div>
+              </div>
+            </div>
+            <div id="a_grpcF" style="display:none;">
+              <div class="f" style="margin-top:10px;"><label data-i18n="label_grpc_service">Service name</label><input id="a_grpc"></div>
+            </div>
+          </div>
+          <div class="trow">
+            <div><div class="trl" data-i18n="label_encryption">Encryption</div><div class="trd" data-i18n="label_encryption_hint">Usually none</div></div>
+            <label class="sw"><input type="checkbox" id="a_encryption"><span class="sl"></span></label>
+          </div>
+        </div>
+
+        <div class="brow">
+          <button onclick="advGen()" data-i18n="btn_generate">⚡ Generate</button>
+          <button class="ghost sm" id="aQrBtn" onclick="advQR()" data-i18n="btn_qr">⬛ QR</button>
+          <button class="ghost sm" onclick="advDl()" data-i18n="btn_dl_txt">↓ TXT</button>
+          <button class="ghost sm" onclick="advDlB64()" data-i18n="btn_dl_b64">↓ Base64</button>
+          <button class="ghost sm" onclick="advDlJSON()" data-i18n="btn_dl_json">↓ JSON</button>
+          <button class="ghost sm" onclick="advDlClash()" data-i18n="btn_dl_clash">↓ Clash</button>
+          <button class="ghost sm" onclick="advDlSingbox()" data-i18n="btn_dl_singbox">↓ Sing-box</button>
+          <button class="ghost sm" onclick="saveProfile('advanced')" data-i18n="btn_save_profile">💾 Save Profile</button>
+          <button class="ghost sm" style="margin-left:auto;" onclick="advClear()" data-i18n="btn_clear">✕ Clear</button>
+        </div>
+
+        <div class="qrw" id="aQrW">
+          <canvas id="aQr"></canvas>
+          <div class="qr-nav" id="aQrNav" style="display:none;">
+            <button class="ghost sm" onclick="aQrPrev()" data-i18n="btn_prev">‹ Prev</button>
+            <span id="aQrIdx" style="font-size:11px;color:var(--muted);">1 / 1</span>
+            <button class="ghost sm" onclick="aQrNext()" data-i18n="btn_next">Next ›</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="pan2" id="ap-imp">
+        <div class="card">
+          <div class="ctitle" data-i18n="adv_paste_uri_title">Paste vless:// URI</div>
+          <div class="f">
+            <textarea id="impUri" rows="5" style="font-size:11px;color:var(--accent);" placeholder="vless://uuid@host:port?...#Remark"></textarea>
+          </div>
+          <button onclick="advParse()" data-i18n="btn_parse">▶ Parse &amp; Preview</button>
+        </div>
+        <div class="card" id="parsePrev" style="display:none;">
+          <div class="ctitle" data-i18n="adv_parsed_fields_title">Parsed fields</div>
+          <div id="parseRows"></div>
+          <div class="brow">
+            <button onclick="applyParsed()" data-i18n="btn_apply_to_generator">Apply to Generator</button>
+            <button class="ghost sm" onclick="G('parsePrev').style.display='none'" data-i18n="btn_dismiss">Dismiss</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="pan2" id="ap-hist">
+        <div class="card">
+          <div class="ohead">
+            <div class="ctitle" style="margin:0;" data-i18n="adv_history_title">Session History</div>
+            <div style="display:flex;gap:6px;">
+              <button class="ghost sm" onclick="exportHist()" data-i18n="btn_export">↓ Export</button>
+              <button class="ghost sm" onclick="clearHist()" data-i18n="btn_clear">✕ Clear</button>
+            </div>
+          </div>
+          <div id="histList"></div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:13px;">
+        <div class="ohead">
+          <div style="display:flex;align-items:center;gap:9px;">
+            <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;" data-i18n="label_output">Output</span>
+            <span class="badge gr" id="aBadge">0 links</span>
+          </div>
+          <div style="display:flex;gap:6px;">
+            <button class="icn sm" onclick="advDl()">↓</button>
+            <button class="icn sm" onclick="advCopyOut()" data-i18n="btn_copy">⎘ Copy</button>
+          </div>
+        </div>
+        <div class="out-toolbar">
+          <input id="aOutFilter" placeholder="🔍 Filter output..." oninput="filterAdvOut()" style="flex:1;min-width:100px;font-size:11px;padding:6px 10px;">
+          <select id="aOutSort" onchange="sortAdvOut()" style="font-size:11px;padding:6px 8px;">
+            <option value="" data-i18n="sort_default">— Sort —</option>
+            <option value="asc" data-i18n="sort_asc">A→Z (remark)</option>
+            <option value="desc" data-i18n="sort_desc">Z→A (remark)</option>
+            <option value="ip" data-i18n="sort_ip">By IP</option>
+          </select>
+          <button class="ghost sm" onclick="shuffleAdvOut()" style="padding:6px 10px;font-size:10px;" data-i18n="btn_shuffle">⇌ Shuffle</button>
+        </div>
+        <div class="out empty" id="aOut" data-i18n="adv_output_empty">Nothing generated yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TAB: PROFILES ══ -->
+  <div class="tab-panel" id="tp-profiles">
+    <div class="card">
+      <div class="ohead">
+        <div class="ctitle" style="margin:0;" data-i18n="profiles_title">Saved Profiles</div>
+        <button class="ghost sm" onclick="clearAllProfiles()" data-i18n="btn_clear_all">✕ Clear All</button>
+      </div>
+      <div class="notice" style="margin-top:12px;" data-i18n="profiles_notice">
+        💡 Save your generator settings as named profiles and reload them instantly.
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center;">
+        <input id="profileSearch" style="flex:1;min-width:140px;" placeholder="🔍 Search profiles..." oninput="renderProfiles()">
+        <button class="ghost sm" onclick="exportProfilesJSON()" data-i18n="btn_export_all">↓ Export All</button>
+        <label class="ghost sm" style="cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:7px 12px;border-radius:9px;border:1px solid var(--border2);background:rgba(255,255,255,0.04);color:var(--muted);font-size:11px;font-weight:700;font-family:'JetBrains Mono',monospace;letter-spacing:0.04em;">
+          <span data-i18n="btn_import">↑ Import</span>
+          <input type="file" accept=".json" style="display:none;" onchange="importProfilesJSON(this)">
+        </label>
+      </div>
+      <div id="profileList" style="margin-top:12px;"></div>
+    </div>
+  </div>
+
+  <!-- ══ TAB: BULK IMPORT ══ -->
+  <div class="tab-panel" id="tp-bulk">
+    <div class="card">
+      <div class="ctitle" data-i18n="bulk_title">Bulk Import &amp; Deduplicate</div>
+      <div class="notice" data-i18n-html="bulk_notice">
+        💡 Supports <strong>three input types</strong> — paste any combination and hit Deduplicate:<br>
+        &nbsp;• Raw <code>vless://</code> links (one per line)<br>
+        &nbsp;• Base64-encoded subscription string<br>
+        &nbsp;• Subscription URL (fetched and decoded automatically)
+      </div>
+
+      <div class="bulk-tabs">
+        <button class="bulk-tab active" id="bt-links" onclick="bulkSwitchTab('links')" data-i18n="bulk_tab_links">📋 vless:// Links</button>
+        <button class="bulk-tab" id="bt-b64" onclick="bulkSwitchTab('b64')" data-i18n="bulk_tab_b64">🔐 Base64 / Sub String</button>
+        <button class="bulk-tab" id="bt-url" onclick="bulkSwitchTab('url')" data-i18n="bulk_tab_url">🌐 Subscription URL</button>
+      </div>
+
+      <!-- Tab: raw vless links -->
+      <div class="bulk-panel active" id="bp-links">
+        <div class="f">
+          <label data-i18n="bulk_links_label">Paste vless:// links (one per line)</label>
+          <textarea id="bulkInput" rows="8" style="font-size:11px;color:var(--accent);" placeholder="vless://...&#10;vless://...&#10;vless://..."></textarea>
+        </div>
+      </div>
+
+      <!-- Tab: base64 -->
+      <div class="bulk-panel" id="bp-b64">
+        <div class="f">
+          <label data-i18n="bulk_b64_label">Paste base64 subscription content</label>
+          <textarea id="subInput" rows="5" style="font-size:11px;" placeholder="dmxlc3M6Ly8..."></textarea>
+        </div>
+        <div class="brow">
+          <button class="ghost sm" onclick="decodeSub()" data-i18n="btn_decode_move">↓ Decode &amp; Move to Links</button>
+          <button class="ghost sm" onclick="G('subInput').value=''" data-i18n="btn_clear">✕ Clear</button>
+        </div>
+      </div>
+
+      <!-- Tab: subscription URL -->
+      <div class="bulk-panel" id="bp-url">
+        <div class="f">
+          <label data-i18n="bulk_url_label">Subscription URL</label>
+          <input id="subUrlInput" autocomplete="off" placeholder="https://example.com/sub?token=..." style="font-size:12px;">
+        </div>
+        <div class="brow">
+          <button onclick="fetchSubUrl()" id="fetchSubBtn" data-i18n="btn_fetch_decode">🌐 Fetch &amp; Decode</button>
+          <button class="ghost sm" onclick="G('subUrlInput').value=''" data-i18n="btn_clear">✕ Clear</button>
+        </div>
+        <div id="subUrlStatus" style="font-size:11px;margin-top:8px;color:var(--muted);"></div>
+      </div>
+
+      <div class="brow" style="margin-top:14px;align-items:center;flex-wrap:wrap;gap:8px;">
+        <button onclick="bulkImport()" data-i18n="btn_dedup_all">▶ Deduplicate All</button>
+        <button class="ghost sm" onclick="bulkClear()" data-i18n="btn_clear_all">✕ Clear All</button>
+        <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;">
+          <label class="sw" style="margin:0;"><input type="checkbox" id="strictDedup"><span class="sl"></span></label>
+          <span data-i18n="strict_dedup_label">Strict dedup</span>
+          <span style="font-size:10px;opacity:0.7;" title="Strict: treats same IP+UUID with different SNIs as duplicates. Default: different SNIs = different configs.">(same server = dup)</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="stats" id="bulkStats" style="display:none;margin-top:12px;">
+      <div class="stat"><div class="sv" id="bTotal">0</div><div class="sk" data-i18n="stat_total">Total</div></div>
+      <div class="stat"><div class="sv" id="bUnique">0</div><div class="sk" data-i18n="stat_unique">Unique</div></div>
+      <div class="stat"><div class="sv" id="bDupes">0</div><div class="sk" data-i18n="stat_removed">Removed</div></div>
+    </div>
+
+    <div class="card" id="bulkResultCard" style="display:none;margin-top:12px;">
+      <div class="ohead">
+        <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;" data-i18n="bulk_output_label">Deduplicated Output</span>
+        <div style="display:flex;gap:6px;">
+          <button class="icn sm" onclick="bulkCopy()" data-i18n="btn_copy">⎘ Copy</button>
+          <button class="icn sm" onclick="bulkDl()" data-i18n="btn_dl_txt">↓ TXT</button>
+          <button class="icn sm" onclick="bulkDlB64()" data-i18n="btn_dl_b64">↓ B64</button>
+        </div>
+      </div>
+      <div class="out" id="bulkOut" style="max-height:300px;"></div>
+    </div>
+  </div>
+
+  <!-- ══ TAB: TOOLS ══ -->
+  <div class="tab-panel" id="tp-tools">
+
+    <div class="card">
+      <div class="ctitle" data-i18n="tools_validator_title">⚡ Config Validator — Check a link</div>
+      <div class="notice" data-i18n="tools_validator_notice">Paste a vless:// link and get an instant health check — UUID format, port range, required fields, TLS params, and a TCPing to verify the server is reachable.</div>
+      <div class="f">
+        <label data-i18n="tools_validator_label">vless:// link to validate</label>
+        <textarea id="validateInput" rows="3" style="font-size:11px;color:var(--accent);" placeholder="vless://uuid@host:443?security=tls&amp;type=xhttp...#Remark"></textarea>
+      </div>
+      <div class="brow">
+        <button onclick="runValidator()" data-i18n="btn_validate">🔍 Validate</button>
+        <button class="ghost sm" onclick="runValidatorWithPing()" data-i18n="btn_validate_ping">🔍 + TCPing</button>
+        <button class="ghost sm" onclick="G('validateInput').value='';G('validateResult').style.display='none'" data-i18n="btn_clear">✕ Clear</button>
+      </div>
+      <div id="validateResult" style="margin-top:14px;display:none;"></div>
+    </div>
+
+    <div class="card">
+      <div class="ctitle" data-i18n="tools_diff_title">Config Diff — Compare two links</div>
+      <div class="g2">
+        <div class="f">
+          <label data-i18n="tools_diff_link_a">Link A</label>
+          <textarea id="diffA" rows="3" style="font-size:11px;color:var(--accent);" placeholder="vless://..."></textarea>
+        </div>
+        <div class="f">
+          <label data-i18n="tools_diff_link_b">Link B</label>
+          <textarea id="diffB" rows="3" style="font-size:11px;color:var(--accent);" placeholder="vless://..."></textarea>
+        </div>
+      </div>
+      <button onclick="runDiff()" data-i18n="btn_compare">🔍 Compare</button>
+      <div id="diffResult" style="margin-top:14px;display:none;">
+        <div class="ctitle" style="margin-bottom:10px;" data-i18n="tools_diff_differences">Differences</div>
+        <div id="diffRows"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="ctitle" data-i18n="tools_b64_title">Base64 Encoder / Decoder</div>
+      <div class="f">
+        <label data-i18n="label_input">Input</label>
+        <textarea id="b64Input" rows="4" style="font-size:11px;" placeholder="vless:// links or base64 string"></textarea>
+      </div>
+      <div class="brow">
+        <button onclick="doEncode()" data-i18n="btn_encode">→ Encode to Base64</button>
+        <button class="ghost sm" onclick="doDecode()" data-i18n="btn_decode">← Decode from Base64</button>
+      </div>
+      <div class="f" style="margin-top:12px;">
+        <label data-i18n="label_output">Output</label>
+        <textarea id="b64Output" rows="4" style="font-size:11px;color:var(--accent);" readonly placeholder="Result appears here..."></textarea>
+      </div>
+      <div class="brow">
+        <button class="ghost sm" onclick="copyB64Out()" data-i18n="btn_copy_output">⎘ Copy Output</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="ctitle" data-i18n="tools_renamer_title">Bulk Remark Renamer</div>
+      <div class="notice" data-i18n="tools_renamer_notice">Paste links and apply a new remark template to all of them.</div>
+      <div class="f">
+        <label data-i18n="tools_renamer_links_label">Links (one per line)</label>
+        <textarea id="remarkInput" rows="4" style="font-size:11px;color:var(--accent);" placeholder="vless://..."></textarea>
+      </div>
+      <div class="g2">
+        <div class="f">
+          <label data-i18n="label_remark_tpl">Remark Template</label>
+          <input id="remarkTpl" placeholder="{prefix}_{ip}_{idx}">
+          <div class="hint" data-i18n="remark_vars_hint">Vars: {prefix} {ip} {sni} {port} {idx}</div>
+        </div>
+        <div class="f">
+          <label data-i18n="label_prefix">Prefix value</label>
+          <input id="remarkPrefix" placeholder="Server">
+        </div>
+      </div>
+      <div class="brow">
+        <button onclick="runRenamer()" data-i18n="btn_rename">✏ Rename</button>
+        <button class="ghost sm" onclick="copyRenameOut()" data-i18n="btn_copy">⎘ Copy</button>
+        <button class="ghost sm" onclick="dlRenameOut()" data-i18n="btn_download">↓ Download</button>
+      </div>
+      <div class="f" style="margin-top:12px;">
+        <label data-i18n="label_output">Output</label>
+        <textarea id="remarkOutput" rows="4" style="font-size:11px;color:var(--accent);" readonly placeholder="Result appears here..."></textarea>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="ctitle" data-i18n="tools_tcping_title">TCPing — Check if IPs / hosts are reachable</div>
+      <div class="notice" data-i18n="tools_tcping_notice">Measures raw TCP SYN-ACK round-trip time to host:port — same method as v2rayN Ctrl+O. Tests network reachability, not proxy functionality.</div>
+      <div class="f">
+        <label data-i18n="tools_tcping_hosts_label">IPs / Hosts to test (one per line)</label>
+        <textarea id="pingInput" rows="5" style="font-size:11px;" placeholder="1.2.3.4&#10;cdn.example.com&#10;5.6.7.8"></textarea>
+      </div>
+      <div class="f ping-inline-row" style="display:flex;flex-direction:row;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label class="ping-lbl" style="margin:0;" data-i18n="label_port">Port</label>
+        <input id="pingPort" value="443" type="number" class="ping-fld" style="width:90px;">
+        <label class="ping-lbl" style="margin:0;" data-i18n="label_timeout_ms">Timeout (ms)</label>
+        <input id="pingTimeout" value="5000" type="number" class="ping-fld" style="width:90px;">
+        <label class="ping-lbl" style="margin:0;" data-i18n="label_repeat">Repeat</label>
+        <input id="pingRepeat" value="3" type="number" min="1" max="10" class="ping-fld" style="width:60px;" title="Number of TCP probes per host (avg is shown)">
+      </div>
+      <div class="brow">
+        <button onclick="runPing()" id="pingBtn" data-i18n="btn_tcping_all">⚡ TCPing All</button>
+        <button class="ghost sm" onclick="clearPing()" data-i18n="btn_clear">✕ Clear</button>
+      </div>
+      <div id="pingResults" style="margin-top:12px;"></div>
+    </div>
+
+    <!-- ══ BALANCER CARD ══ -->
+    <div class="card" id="balancer-card">
+      <div class="ctitle" data-i18n="tools_balancer_title">⚖ Config Balancer — Generate v2rayNG / sing-box JSON</div>
+      <div class="notice" data-i18n="tools_balancer_notice">
+        Paste any text containing <code>vless://</code> links. The balancer generates a ready-to-use JSON config with auto load-balancing for v2rayNG (Xray) or sing-box 1.13+.
+      </div>
+
+      <!-- Live node preview -->
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <label style="margin:0;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;" data-i18n="tools_balancer_input_label">Input Links</label>
+          <span id="balLiveCount" style="font-size:10px;color:var(--accent);font-weight:700;">0 nodes</span>
+        </div>
+        <textarea id="balInputNodes" rows="5" style="font-size:11px;color:var(--accent);" placeholder="Paste any text with vless:// links…&#10;vless://uuid@1.2.3.4:443?security=tls&amp;type=xhttp...#MyProxy&#10;vless://..."></textarea>
+      </div>
+
+      <!-- Parsed node chips -->
+      <div id="balNodePreview" style="display:none;">
+        <div style="font-size:9px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:6px;" data-i18n="tools_balancer_nodes_label">Parsed Nodes</div>
+        <div id="balNodeList" style="display:flex;flex-direction:column;gap:5px;max-height:180px;overflow-y:auto;padding-right:2px;"></div>
+      </div>
+
+      <!-- Settings -->
+      <div class="g2" style="row-gap:10px;">
+        <div class="f" style="margin:0;">
+          <label data-i18n="tools_balancer_format_label">Output Format</label>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
+            <button class="ghost sm bal-fmt-btn active" id="balFmtXray" onclick="balSetFormat(0)" style="flex:1;" data-i18n="tools_balancer_xray">Xray (v2rayNG)</button>
+            <button class="ghost sm bal-fmt-btn" id="balFmtSing" onclick="balSetFormat(1)" style="flex:1;" data-i18n="tools_balancer_singbox">sing-box 1.13+</button>
+          </div>
+        </div>
+        <div class="f" style="margin:0;">
+          <label data-i18n="tools_balancer_strategy_label">Balancer Strategy</label>
+          <select id="balStrategy">
+            <option value="leastPing" data-i18n="tools_balancer_least_ping">🚀 Least Ping (Recommended)</option>
+            <option value="random" data-i18n="tools_balancer_random">🎲 Random / Selector</option>
+          </select>
+        </div>
+        <div class="f" style="margin:0;">
+          <label data-i18n="tools_balancer_probe_url_label">Probe URL</label>
+          <input id="balProbeUrl" value="https://cp.cloudflare.com/generate_204">
+        </div>
+        <div class="f" style="margin:0;">
+          <label data-i18n="tools_balancer_probe_interval_label">Probe Interval</label>
+          <input id="balProbeInterval" value="30s" style="width:100%;">
+        </div>
+        <div class="f" style="margin:0;">
+          <label data-i18n="tools_balancer_socks_port_label">Local SOCKS Port</label>
+          <input id="balSocksPort" type="number" value="10808">
+        </div>
+      </div>
+
+      <div class="brow">
+        <button onclick="balGenerate()" data-i18n="tools_balancer_generate">⚡ Generate Config</button>
+        <button class="ghost sm" onclick="balCopyOut()" data-i18n="btn_copy">⎘ Copy</button>
+        <button class="ghost sm" onclick="balDownload()" data-i18n="tools_balancer_download">↓ Download JSON</button>
+        <button class="ghost sm" onclick="balClear()" data-i18n="btn_clear">✕ Clear</button>
+      </div>
+
+      <div id="balStatus" style="font-size:11px;color:var(--accent3);display:none;margin-top:-4px;"></div>
+
+      <div class="card" style="margin-top:2px;padding:10px 12px;display:none;" id="balOutWrap">
+        <div class="ohead" style="margin-bottom:8px;">
+          <span style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;" id="balOutLabel" data-i18n="tools_balancer_output_label">Generated JSON</span>
+          <div style="display:flex;gap:5px;">
+            <button class="icn sm" onclick="balCopyOut()">⎘</button>
+            <button class="icn sm" onclick="balDownload()">↓</button>
+          </div>
+        </div>
+        <textarea id="balOutput" rows="10" readonly style="font-size:10px;color:var(--accent);background:var(--bg2);border:1px solid var(--border2);border-radius:8px;padding:10px;width:100%;resize:vertical;"></textarea>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="ctitle" data-i18n="tools_cfg_tcping_title">Config TCPing — Test vless:// configs</div>
+      <div class="notice" data-i18n="tools_cfg_tcping_notice">Paste vless:// links and TCPing each config's server:port. Shows RTT per config with remark name — like v2rayN's per-server TCPing test (Ctrl+O).</div>
+      <div class="f">
+        <label data-i18n="tools_cfg_tcping_label">vless:// links (one per line)</label>
+        <textarea id="cfgPingInput" rows="6" style="font-size:11px;color:var(--accent);" placeholder="vless://uuid@1.2.3.4:443?...#MyConfig&#10;vless://uuid@5.6.7.8:443?...#AnotherConfig"></textarea>
+      </div>
+      <div class="brow" style="margin-bottom:6px;">
+        <button class="ghost sm" onclick="cfgPingFromOutput()" data-i18n="btn_load_from_adv">📋 Load from Advanced Output</button>
+        <button class="ghost sm" onclick="cfgPingFromBulk()" data-i18n="btn_load_from_bulk">📋 Load from Bulk</button>
+      </div>
+      <div class="f ping-inline-row" style="display:flex;flex-direction:row;gap:8px;align-items:center;flex-wrap:wrap;">
+        <label class="ping-lbl" style="margin:0;" data-i18n="label_timeout_ms">Timeout (ms)</label>
+        <input id="cfgPingTimeout" value="5000" type="number" class="ping-fld" style="width:90px;">
+        <label class="ping-lbl" style="margin:0;" data-i18n="label_repeat">Repeat</label>
+        <input id="cfgPingRepeat" value="3" type="number" min="1" max="10" class="ping-fld" style="width:60px;">
+        <label style="margin:0;display:flex;align-items:center;gap:6px;">
+          <label class="sw" style="margin:0;"><input type="checkbox" id="cfgPingSortByMs" checked><span class="sl"></span></label>
+          <span data-i18n="sort_by_rtt">Sort by RTT</span>
+        </label>
+      </div>
+      <div class="brow">
+        <button onclick="runCfgPing()" id="cfgPingBtn" data-i18n="btn_tcping_configs">⚡ TCPing Configs</button>
+        <button class="ghost sm" onclick="cfgPingExportFast()" data-i18n="btn_export_fastest">↓ Export fastest</button>
+        <button class="ghost sm" onclick="clearCfgPing()" data-i18n="btn_clear">✕ Clear</button>
+      </div>
+      <div id="cfgPingResults" style="margin-top:12px;"></div>
+    </div>
+
+  </div>
+
+  <!-- ══ TAB: SAVED DATA MANAGER ══ -->
+  <div class="tab-panel" id="tp-uuids">
+    <div class="tabs2" id="savedDataTabs" style="margin-bottom:10px;">
+      <button class="tab2 active" onclick="savedDataTab('uuids')" data-i18n="saved_tab_uuids">🔑 UUIDs</button>
+      <button class="tab2" onclick="savedDataTab('ips')" data-i18n="saved_tab_ips">🌐 IPs</button>
+      <button class="tab2" onclick="savedDataTab('snis')" data-i18n="saved_tab_snis">🔒 SNIs</button>
+    </div>
+
+    <!-- UUID Panel -->
+    <div class="pan2 active" id="sdp-uuids">
+      <div class="card">
+        <div class="ohead">
+          <div class="ctitle" style="margin:0;" data-i18n="uuid_manager_title">UUID Manager</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;">
+            <button onclick="addUUID()" data-i18n="btn_gen_add_uuid">↻ Generate &amp; Add</button>
+            <button class="ghost sm" onclick="showAddCustomUUID()" data-i18n="btn_add_custom_uuid">+ Custom UUID</button>
+          </div>
+        </div>
+        <div id="customUUIDRow" style="display:none;margin-top:10px;">
+          <div class="f" style="margin:0;display:flex;gap:7px;align-items:flex-end;">
+            <div style="flex:1;">
+              <label data-i18n="label_uuid">Your UUID</label>
+              <input id="customUUIDInput" autocomplete="off" placeholder="xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx" oninput="validateCustomUUID()">
+              <div class="err-msg" id="err_customUUID" data-i18n="err_invalid_uuid">Invalid UUID format</div>
+            </div>
+            <div style="min-width:100px;">
+              <label data-i18n="label_nickname">Nickname</label>
+              <input id="customUUIDName" placeholder="My UUID">
+            </div>
+            <button onclick="confirmAddCustomUUID()" style="margin-bottom:0;flex-shrink:0;" data-i18n="btn_add">+ Add</button>
+            <button class="ghost sm" onclick="G('customUUIDRow').style.display='none'" style="margin-bottom:0;flex-shrink:0;">✕</button>
+          </div>
+        </div>
+        <div class="notice" style="margin-top:12px;" data-i18n-html="uuid_notice">
+          💡 Save UUIDs with nicknames. Click <strong>★</strong> in any UUID field to pick one from here instantly.
+        </div>
+        <div id="uuidList" style="margin-top:12px;"></div>
+      </div>
+    </div>
+
+    <!-- IP Panel -->
+    <div class="pan2" id="sdp-ips">
+      <div class="card">
+        <div class="ohead">
+          <div class="ctitle" style="margin:0;" data-i18n="ip_lists_title">Saved IP Lists</div>
+          <button class="ghost sm" onclick="showAddIPList()" data-i18n="btn_add_new">✎ Add New</button>
+        </div>
+        <div id="addIPListRow" style="display:none;margin-top:10px;">
+          <div class="f" style="margin:0;display:flex;gap:7px;align-items:flex-end;">
+            <div style="flex:1;">
+              <label data-i18n="label_label">Label</label>
+              <input id="ipListName" placeholder="e.g. Cloudflare IPs">
+            </div>
+            <div style="flex:2;">
+              <label data-i18n="label_ips_hosts_one_per_line">IPs / Hosts (one per line)</label>
+              <textarea id="ipListInput" rows="1" placeholder="1.2.3.4&#10;5.6.7.8" style="min-height:38px;"></textarea>
+            </div>
+            <button onclick="confirmAddIPList()" style="margin-bottom:0;flex-shrink:0;" data-i18n="btn_save">+ Save</button>
+            <button class="ghost sm" onclick="G('addIPListRow').style.display='none'" style="margin-bottom:0;flex-shrink:0;">✕</button>
+          </div>
+        </div>
+        <div class="notice" style="margin-top:10px;" data-i18n-html="ip_list_notice">
+          💡 Click <strong>★ Save</strong> next to any IP field to save, or <strong>★ Load</strong> to load a saved list.
+        </div>
+        <div id="ipSavedList" style="margin-top:10px;"></div>
+      </div>
+    </div>
+
+    <!-- SNI Panel -->
+    <div class="pan2" id="sdp-snis">
+      <div class="card">
+        <div class="ohead">
+          <div class="ctitle" style="margin:0;" data-i18n="sni_lists_title">Saved SNI Lists</div>
+          <button class="ghost sm" onclick="showAddSNIList()" data-i18n="btn_add_new">✎ Add New</button>
+        </div>
+        <div id="addSNIListRow" style="display:none;margin-top:10px;">
+          <div class="f" style="margin:0;display:flex;gap:7px;align-items:flex-end;">
+            <div style="flex:1;">
+              <label data-i18n="label_label">Label</label>
+              <input id="sniListName" placeholder="e.g. My CDN SNIs">
+            </div>
+            <div style="flex:2;">
+              <label data-i18n="label_snis_one_per_line">SNIs (one per line)</label>
+              <textarea id="sniListInput" rows="1" placeholder="cdn.example.com&#10;sub.domain.com" style="min-height:38px;"></textarea>
+            </div>
+            <button onclick="confirmAddSNIList()" style="margin-bottom:0;flex-shrink:0;" data-i18n="btn_save">+ Save</button>
+            <button class="ghost sm" onclick="G('addSNIListRow').style.display='none'" style="margin-bottom:0;flex-shrink:0;">✕</button>
+          </div>
+        </div>
+        <div class="notice" style="margin-top:10px;" data-i18n-html="sni_list_notice">
+          💡 Click <strong>★ Save SNIs</strong> next to any SNI field to save, or <strong>★ Load SNIs</strong> to load a saved list.
+        </div>
+        <div id="sniSavedList" style="margin-top:10px;"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- IP List Picker Modal -->
+<div id="ipModal" class="modal" onclick="closeIPModal(event)">
+  <div class="modal-box">
+    <div class="ctitle" style="margin-bottom:12px;" data-i18n="modal_load_ip_title">Load a Saved IP List</div>
+    <div id="ipPickList"></div>
+    <button class="ghost sm" style="margin-top:12px;width:100%;" onclick="closeIPModalDirect()" data-i18n="btn_cancel">✕ Cancel</button>
+  </div>
+</div>
+
+<!-- SNI List Picker Modal -->
+<div id="sniModal" class="modal" onclick="closeSNIModal(event)">
+  <div class="modal-box">
+    <div class="ctitle" style="margin-bottom:12px;" data-i18n="modal_load_sni_title">Load a Saved SNI List</div>
+    <div id="sniPickList"></div>
+    <button class="ghost sm" style="margin-top:12px;width:100%;" onclick="closeSNIModalDirect()" data-i18n="btn_cancel">✕ Cancel</button>
+  </div>
+</div>
+
+<!-- UUID Picker Modal -->
+<div id="uuidModal" class="modal" onclick="closeUUIDModal(event)">
+  <div class="modal-box">
+    <div class="ctitle" style="margin-bottom:12px;" data-i18n="modal_pick_uuid_title">Pick a Saved UUID</div>
+    <div id="uuidPickList"></div>
+    <button class="ghost sm" style="margin-top:12px;width:100%;" onclick="closeUUIDModalDirect()" data-i18n="btn_cancel">✕ Cancel</button>
+  </div>
+</div>
+
+
+<!-- Save IP/SNI List Modal (replaces prompt() — works on Android) -->
+<div id="saveListModal" class="modal" onclick="closeSaveListModalBg(event)">
+  <div class="modal-box">
+    <div class="ctitle" style="margin-bottom:12px;" data-i18n="modal_save_profile_title">Save List</div>
+    <div class="f">
+      <label data-i18n="label_label">Label for this list</label>
+      <input id="saveListLabelInput" placeholder="e.g. Cloudflare IPs, My SNIs..." onkeydown="if(event.key==='Enter') confirmSaveList()">
+    </div>
+    <div class="brow">
+      <button onclick="confirmSaveList()" data-i18n="btn_save">💾 Save</button>
+      <button class="ghost sm" onclick="closeSaveListModal()" data-i18n="btn_cancel">✕ Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Save Profile Modal -->
+<div id="profileModal" class="modal" onclick="closeProfileModal(event)">
+  <div class="modal-box">
+    <div class="ctitle" style="margin-bottom:12px;" data-i18n="modal_save_profile_title">Save Profile</div>
+    <div class="f">
+      <label data-i18n="modal_profile_name_label">Profile Name</label>
+      <input id="profileName" placeholder="e.g. Work Server, Home VPN...">
+    </div>
+    <div class="f">
+      <label><span data-i18n="modal_sub_url_label">Subscription URL</span> <span style="font-size:10px;color:var(--muted);font-weight:400;" data-i18n="modal_sub_url_optional">(optional — enables one-click refresh)</span></label>
+      <input id="profileSubUrl" placeholder="https://example.com/sub?token=...">
+    </div>
+    <div class="brow">
+      <button onclick="confirmSaveProfile()" data-i18n="btn_save_profile">💾 Save</button>
+      <button class="ghost sm" onclick="closeProfileModalDirect()" data-i18n="btn_cancel">✕ Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="i18n.js"></script>
+<script src="renderer.js"></script>
+
+  <!-- ══ Telegram Mini App Integration ══ -->
+  <script>
+  (function initTelegramMiniApp() {
+    var tg = window.Telegram && window.Telegram.WebApp;
+    if (!tg) return; // running outside Telegram — no-op
+
+    // NOTE: tg.expand() and tg.ready() are intentionally called
+    // AFTER the security gate verifies the user (see gate logic below).
+    // Only theme sync runs immediately here.
+
+    function applyTgTheme() {
+      var isDark = tg.colorScheme === 'dark';
+      var body = document.body;
+
+      // Respect user's in-app toggle if they've already chosen one;
+      // otherwise follow Telegram's system theme on first load.
+      var saved = null;
+      try { saved = JSON.parse(localStorage.getItem('bc_theme')); } catch(e) {}
+      if (saved === null) {
+        if (isDark) {
+          body.classList.remove('light');
+          var btn = document.getElementById('themeToggle');
+          if (btn) btn.textContent = '☀';
+        } else {
+          body.classList.add('light');
+          var btn2 = document.getElementById('themeToggle');
+          if (btn2) btn2.textContent = '🌙';
+        }
+      }
+
+      // Override the Telegram WebView background so there's no white flash
+      // on launch before our CSS kicks in.
+      var bg = isDark ? '#070c12' : '#f0f7ff';
+      tg.setBackgroundColor(bg);
+      tg.setHeaderColor(bg);
+    }
+
+    applyTgTheme();
+    tg.onEvent('themeChanged', applyTgTheme);
+
+    // 4. Back button — show it when a modal is open, close on press
+    function refreshBackBtn() {
+      var anyOpen = ['ipModal','sniModal','uuidModal','saveListModal','profileModal']
+        .some(function(id) {
+          var el = document.getElementById(id);
+          return el && el.style.display === 'flex';
+        });
+      if (anyOpen) { tg.BackButton.show(); }
+      else { tg.BackButton.hide(); }
+    }
+
+    tg.BackButton.onClick(function() {
+      // Close whichever modal is open
+      ['closeIPModalDirect','closeSNIModalDirect','closeUUIDModalDirect',
+       'closeSaveListModal','closeProfileModalDirect'].forEach(function(fn) {
+        if (typeof window[fn] === 'function') {
+          try { window[fn](); } catch(e) {}
+        }
+      });
+      refreshBackBtn();
+    });
+
+    // Patch modal open/close calls to keep BackButton in sync
+    var _origOpen = window.openModal;
+    document.addEventListener('click', function() {
+      setTimeout(refreshBackBtn, 50);
+    });
+
+    // 5. Haptic feedback on generate buttons
+    document.addEventListener('click', function(e) {
+      var btn = e.target.closest('button');
+      if (!btn || !tg.HapticFeedback) return;
+      if (btn.classList.contains('ghost') || btn.classList.contains('icn')) {
+        tg.HapticFeedback.selectionChanged();
+      } else if (btn.tagName === 'BUTTON') {
+        tg.HapticFeedback.impactOccurred('light');
+      }
+    });
+
+    // 6. Expose tg globally so renderer.js can use it (e.g. showAlert instead of alert)
+    window._tg = tg;
+
+  })();
+  </script>
+
+  <script>
+  // Mobile: wrap theme/lang toggle buttons in a flex row at bottom of header
+  (function() {
+    function wrapHeaderButtons() {
+      var header = document.querySelector('.header');
+      var themeBtn = document.getElementById('themeToggle');
+      var langBtn = document.getElementById('langToggle');
+      if (!header || !themeBtn || !langBtn) return;
+      var row = document.createElement('div');
+      row.className = 'header-btn-row';
+      row.appendChild(themeBtn);
+      row.appendChild(langBtn);
+      header.appendChild(row);
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', wrapHeaderButtons);
+    } else {
+      wrapHeaderButtons();
+    }
+  })();
+  </script>
+
+</body>
+</html>
