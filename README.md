@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=32&pause=1000&color=6E56CF&center=true&vCenter=true&width=435&lines=⬡+Trace" alt="Trace" />
+<img src="./logo.svg" alt="Trace" />
 
 **A client-side VLESS proxy configuration suite.**
 
