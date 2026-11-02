@@ -2,13 +2,10 @@
 'use strict';
 const G = function(id){ return document.getElementById(id); };
 let advType = 'xhttp';
-let simType = 'tcp';
-let simHasEnc = false;
+let advEnc = 'none';  // value written when the Encryption toggle is on
+let advPass = [];     // [key,value] params of a loaded link with no dedicated field
 let hist = [];
-let parsedD = null;
-let sQrLinks = [], sQrCur = 0;
 let aQrLinks = [], aQrCur = 0;
-let _saveMode = 'simple';
 let _uuidTarget = null;
 
 // ── Base64 (Unicode-safe) ─────────────────────────────────
@@ -38,54 +35,143 @@ function fromBase64(b64) {
 }
 function lsGet(k){ try{ var v=JSON.parse(localStorage.getItem(k)); return v; }catch(e){ return null; } }
 function lsGetArr(k){ var v=lsGet(k); return Array.isArray(v)?v:[]; }
+// Returns true when v was stored. Saved data is never trimmed to fit: on overflow the
+// oldest history entries are evicted (they can be regenerated), and if that isn't
+// enough the write is refused so callers can leave the user's existing data untouched.
 function lsSet(k,v){
-  try{
-    localStorage.setItem(k, JSON.stringify(v));
-  } catch(e) {
-    if(e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED') {
-      // For any array-valued key, trim to half on overflow so adjacent keys are not corrupted.
-      if(Array.isArray(v) && v.length > 1) {
-        var arr = v.slice(0, Math.max(1, Math.floor(v.length / 2)));
-        try {
-          localStorage.setItem(k, JSON.stringify(arr));
-          toast('Storage full — trimmed "' + k + '" to ' + arr.length + ' entries', 'err');
-        } catch(e2) {
-          console.error('lsSet: could not recover from quota (' + k + ')', e2);
-          toast('Storage full — could not save "' + k + '"', 'err');
-        }
-      } else {
-        toast('Storage full — could not save "' + k + '"', 'err');
-        console.error('lsSet failed (quota) for key:', k);
+  for(;;) {
+    try {
+      localStorage.setItem(k, JSON.stringify(v));
+      return true;
+    } catch(e) {
+      if(e.name !== 'QuotaExceededError' && e.name !== 'NS_ERROR_DOM_QUOTA_REACHED') {
+        console.error('lsSet failed ('+k+'):', e);
+        toast(t('toast_storage_failed'), 'err');
+        return false;
       }
-    } else {
-      console.error('lsSet failed ('+k+'):', e);
+      if(!hist.length) break;
+      hist.pop(); // when k is bc_hist, v is hist itself, so the retry writes less
+      if(k !== 'bc_hist') {
+        try { localStorage.setItem('bc_hist', JSON.stringify(hist)); } catch(e2) {}
+      } else if(!hist.length) {
+        break;
+      }
     }
   }
+  console.error('lsSet failed (quota) for key:', k);
+  toast(t('toast_storage_full'), 'err');
+  return false;
 }
 
 // ── Safe fetch — URL allow-list to prevent SSRF ─────────────
 // Only http:// and https:// are permitted. file://, data://, ftp://,
 // and private/link-local addresses are blocked before the network call.
-const _SSRF_BLOCK_RE = /^(0\.0\.0\.0|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|::1|\[::1\]|\[::ffff:(127|10)\.\d+\.\d+\.\d+\]|\[::ffff:192\.168\.\d+\.\d+\]|\[::ffff:172\.(1[6-9]|2\d|3[01])\.\d+\.\d+\]|\[fc[0-9a-f][0-9a-f]:[^\]]*\]|\[fd[0-9a-f][0-9a-f]:[^\]]*\]|\[fe80:[^\]]*\]|localhost|.*\.local)$/i;
+function _isPrivateIPv4(a, b) {
+  return a === 0 || a === 10 || a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168);
+}
 
 function _isBlockedHost(hostname) {
   if(!hostname) return true;
-  // strip IPv6 brackets for bare-address tests
-  var bare = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname;
-  return _SSRF_BLOCK_RE.test(hostname) || _SSRF_BLOCK_RE.test(bare);
+  var raw = String(hostname).trim();
+  if(raw.charAt(0) !== '[' && raw.split(':').length > 2) raw = '[' + raw + ']';
+  // The URL parser canonicalises 127.1, 0x7f.0.0.1, 2130706433 and IPv6 spellings
+  var host;
+  try { host = new URL('http://' + raw + '/').hostname.toLowerCase(); } catch(e) { return false; }
+  host = host.replace(/\.+$/, '');
+  if(host === 'localhost' || /\.(localhost|local)$/.test(host)) return true;
+  if(host.charAt(0) === '[') {
+    var v6 = host.slice(1, -1);
+    var mapped = v6.match(/^::ffff:([0-9a-f]{1,4}):[0-9a-f]{1,4}$/);
+    if(mapped) {
+      var hi = parseInt(mapped[1], 16);
+      return _isPrivateIPv4(hi >> 8, hi & 255);
+    }
+    return v6 === '::' || v6 === '::1' || /^f[cd]/.test(v6) || /^fe[89ab]/.test(v6);
+  }
+  var v4 = host.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  return !!v4 && _isPrivateIPv4(parseInt(v4[1], 10), parseInt(v4[2], 10));
 }
 
 function safeFetch(url, opts) {
   var parsed;
-  try { parsed = new URL(url); } catch(e) { return Promise.reject(new Error('Invalid URL')); }
+  try { parsed = new URL(url); } catch(e) { return Promise.reject(new Error(t('m_bad_url'))); }
   if(parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    return Promise.reject(new Error('Only https:// and http:// URLs are permitted'));
+    return Promise.reject(new Error(t('m_http_only')));
   }
   var host = parsed.hostname;
   if(_isBlockedHost(host)) {
-    return Promise.reject(new Error('Private/loopback addresses are not permitted'));
+    return Promise.reject(new Error(t('m_private')));
   }
-  return fetch(url, opts);
+  return fetch(url, opts).then(function(res) {
+    var finalHost = '';
+    try { finalHost = new URL(res.url).hostname; } catch(e) {}
+    if(res.redirected && finalHost && _isBlockedHost(finalHost)) {
+      throw new Error(t('m_private'));
+    }
+    return res;
+  });
+}
+
+// ── VLESS link parsing ────────────────────────────────────
+// Single parser for every feature that reads a vless:// link.
+function safeDecode(s) {
+  try { return decodeURIComponent(s); } catch(e) { return s; }
+}
+function formatHost(host) {
+  return host.indexOf(':') > -1 && host.charAt(0) !== '[' ? '[' + host + ']' : host;
+}
+
+const _LINK_KEYS  = ['encryption','security','sni','fp','alpn','insecure','allowInsecure','type','host','pbk','sid','spx','flow'];
+const _PATH_TYPES = ['xhttp','ws','httpupgrade','splithttp'];
+
+// Returns the link's fields, or null when it can't be parsed.
+// Values are decoded exactly once and '+' stays literal (URLSearchParams would turn it
+// into a space). Params without a dedicated field are kept in `pass` so that
+// regenerating a link doesn't lose them.
+function parseVless(raw) {
+  raw = String(raw || '').trim();
+  if(!/^vless:\/\//i.test(raw)) return null;
+  var u;
+  try { u = new URL(raw.replace(/^vless:\/\//i, 'https://')); } catch(e) { return null; }
+
+  var q = Object.create(null), order = [];
+  u.search.slice(1).split('&').forEach(function(kv) {
+    if(!kv) return;
+    var eq  = kv.indexOf('=');
+    var key = safeDecode(eq < 0 ? kv : kv.slice(0, eq));
+    if(key in q) return;
+    q[key] = eq < 0 ? '' : safeDecode(kv.slice(eq + 1));
+    order.push(key);
+  });
+
+  var type = q.type || 'tcp';
+  var isX  = type === 'xhttp' || type === 'splithttp';
+  var known = _LINK_KEYS.slice();
+  if(_PATH_TYPES.indexOf(type) > -1) known.push('path');
+  if(isX) known.push('mode', 'extra');
+  if(type === 'grpc') known.push('serviceName');
+
+  return {
+    uuid: safeDecode(u.username),
+    address: u.hostname.replace(/^\[|\]$/g, ''),
+    port: u.port || '443', // https:// parsing strips :443, the VLESS default as well
+    encryption: q.encryption || '',
+    security: q.security || 'none',
+    sni: q.sni || '', fp: q.fp || '', alpn: q.alpn || '',
+    pbk: q.pbk || '', sid: q.sid || '', spx: q.spx || '', flow: q.flow || '',
+    insecure: ['1','true'].indexOf(q.allowInsecure) > -1 || ['1','true'].indexOf(q.insecure) > -1,
+    type: type, host: q.host || '', path: q.path || '/',
+    mode: isX ? (q.mode || '') : '',
+    extra: isX ? (q.extra || '') : '',
+    serviceName: type === 'grpc' ? (q.serviceName || '') : '',
+    remark: safeDecode(u.hash.slice(1)),
+    q: q,
+    pass: order.filter(function(k){ return known.indexOf(k) < 0; }).map(function(k){ return [k, q[k]]; })
+  };
 }
 
 // ── UUID ──────────────────────────────────────────────────
@@ -108,7 +194,7 @@ function newUUID(id) {
   G(id).value = genUUID();
   G(id).classList.remove('invalid');
   var e = G('err_'+id); if(e) e.classList.remove('show');
-  toast(typeof t==='function'?t('toast_new_uuid'):'New UUID generated','ok');
+  toast(t('toast_new_uuid'),'ok');
 }
 function validateUUID(id) {
   var val = G(id).value.trim(), valid = UUID_RE.test(val);
@@ -118,13 +204,25 @@ function validateUUID(id) {
 }
 
 // ── Toast ─────────────────────────────────────────────────
-function toast(msg,t) {
-  var el = G('toast');
+function toast(msg, type, action) {
+  var el = G('toast'), act = G('toastAct');
   if(!el) return;
-  el.textContent = msg;
-  el.className = 'show '+(t||'ok');
+  G('toastMsg').textContent = msg;
+  act.hidden = !action;
+  if(action) {
+    act.textContent = action.label;
+    act.onclick = function(){ el.className = ''; action.run(); };
+  }
+  el.className = 'show ' + (type || 'ok');
+  var bar = G('toastBar');
+  bar.className = '';
+  if(action) { void bar.offsetWidth; bar.className = 'run'; }
   clearTimeout(toast._t);
-  toast._t = setTimeout(function(){ el.className=''; }, 2400);
+  toast._t = setTimeout(function(){ el.className = ''; }, action ? 6000 : 2600);
+}
+// Deleted data stays recoverable for as long as the toast is on screen
+function undoToast(msg, key, previous, restored) {
+  toast(msg, 'ok', { label: t('undo'), run: function(){ lsSet(key, previous); restored(); updateRoute(); } });
 }
 
 // ── Helpers ───────────────────────────────────────────────
@@ -149,7 +247,8 @@ function expandIPRange(entry) {
     if(prefix < 0 || prefix > 32) return [entry];
     var hostBits = 32 - prefix;
     var count = Math.pow(2, hostBits);
-    if(count > 65536) { toast('CIDR /' + prefix + ' would expand to ' + count + ' IPs — max is /16', 'err'); return [entry]; }
+    if(count > 65536) { toast(tf('m_cidr_large', { p: prefix, n: count }), 'err'); return [entry]; }
+    if(!isValidIPv4(base)) return [entry];
     var ipNum = ipToInt(base);
     var networkNum = (ipNum & (~0 << hostBits)) >>> 0;
     // skip network (.0) and broadcast for /30 and larger subnets;
@@ -163,9 +262,10 @@ function expandIPRange(entry) {
   // Range with full IPs: e.g. 192.168.1.1-192.168.1.50
   var fullRangeMatch = entry.match(/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
   if(fullRangeMatch) {
+    if(!isValidIPv4(fullRangeMatch[1]) || !isValidIPv4(fullRangeMatch[2])) return [entry];
     var startN = ipToInt(fullRangeMatch[1]), endN = ipToInt(fullRangeMatch[2]);
-    if(endN < startN) { toast('IP range end is before start', 'err'); return [entry]; }
-    if(endN - startN > 65535) { toast('Range too large — max 65536 IPs', 'err'); return [entry]; }
+    if(endN < startN) { toast(t('m_range_order'), 'err'); return [entry]; }
+    if(endN - startN > 65535) { toast(t('m_range_large'), 'err'); return [entry]; }
     for(var rangeN = startN; rangeN <= endN; rangeN++) result.push(intToIp(rangeN));
     return result;
   }
@@ -175,7 +275,7 @@ function expandIPRange(entry) {
   if(shortRangeMatch) {
     var prefix3 = shortRangeMatch[1];
     var from = parseInt(shortRangeMatch[2], 10), to = parseInt(shortRangeMatch[3], 10);
-    if(to < from || from < 0 || to > 255) { toast('Invalid last-octet range: ' + entry, 'err'); return [entry]; }
+    if(to < from || from < 0 || to > 255 || !isValidIPv4(prefix3 + '0')) { toast(tf('m_bad_octet', { v: entry }), 'err'); return [entry]; }
     for(var i = from; i <= to; i++) result.push(prefix3 + i);
     return result;
   }
@@ -184,6 +284,32 @@ function expandIPRange(entry) {
   return [entry];
 }
 
+function isValidIPv4(ip) {
+  return ip.split('.').every(function(o){ return parseInt(o, 10) <= 255; });
+}
+// expandIPRange hands back any range it refused, so a range-shaped entry here means
+// the expansion failed; generating from it would produce a malformed link.
+function rangesExpanded(ips) {
+  var bad = ips.filter(function(ip){ return /^[\d.]+[-\/][\d.]+$/.test(ip); });
+  if(bad.length) toast(t('toast_invalid_range') + bad[0], 'err');
+  return !bad.length;
+}
+// [ip, sni] pairs to generate. Pair mode runs to the longer list and wraps the shorter
+// one, so it always matches the live counter.
+function pairsOf(ips, snis, paired) {
+  var pairs = [];
+  if(!ips.length) return pairs;
+  if(paired && snis.length) {
+    for(var i = 0; i < Math.max(ips.length, snis.length); i++) {
+      pairs.push([ips[i % ips.length], snis[i % snis.length]]);
+    }
+    return pairs;
+  }
+  ips.forEach(function(ip) {
+    (snis.length ? snis : ['']).forEach(function(sni){ pairs.push([ip, sni]); });
+  });
+  return pairs;
+}
 function ipToInt(ip) {
   // Use multiplication instead of bit-shift to avoid signed 32-bit overflow
   // on octets > 127 (e.g. 192.x, 172.x) during intermediate accumulation.
@@ -204,13 +330,10 @@ function expandIPsInField(id) {
   // when the expanded count happens to equal the input count by coincidence.
   var rangePattern = /^[\d.]+[-\/][\d.]+$/;
   var hasRange = raw.some(function(l){ return rangePattern.test(l.trim()); });
-  if(!hasRange) { toast('No ranges found to expand','ok'); return; }
+  if(!hasRange) { toast(t('m_no_ranges'),'ok'); return; }
   G(id).value = expanded.join('\n');
-  // Do NOT call liveCount() here — callers are responsible for updating their own
-  // live counter (simpleLiveCount vs liveCount) after expansion completes.
-  toast('Expanded to ' + expanded.length + ' IPs','ok');
+  toast(tf('m_expanded', { n: expanded.length }),'ok');
 }
-function expandSimpleIPs() { expandIPsInField('s_ip'); simpleLiveCount(); }
 function expandAdvIPs()    { expandIPsInField('a_ips'); liveCount(); }
 
 // linesOfExpanded: like linesOf but auto-expands ranges before returning
@@ -226,16 +349,29 @@ function linesOfExpanded(id) {
 function togglePairHint(chkId,hintId,offText) {
   var on = G(chkId).checked;
   G(hintId).textContent = on
-    ? (typeof t === 'function' ? t('pair_mode_on') : 'ON — IP[1]↔SNI[1], IP[2]↔SNI[2], … (same index paired)')
-    : (offText || (typeof t === 'function' ? t('pair_mode_off_adv') : 'OFF — full IP × SNI matrix'));
+    ? t('pair_mode_on')
+    : (offText || t('pair_mode_off_adv'));
 }
+// Selects val, adding a temporary option for values the list doesn't offer so a loaded
+// link's setting is kept instead of the previous selection staying silently in place.
 function setOptVal(sel,val) {
-  var opt = sel.querySelector('option[value="'+val+'"]');
-  if(opt) sel.value = val;
+  val = val == null ? '' : String(val);
+  Array.from(sel.options).forEach(function(o){
+    if(o.dataset.loaded && o.value !== val) o.remove();
+  });
+  if(!Array.from(sel.options).some(function(o){ return o.value === val; })) {
+    var opt = new Option(val, val);
+    opt.dataset.loaded = '1';
+    sel.add(opt);
+  }
+  sel.value = val;
 }
-function togPanel(fieldId,chk) {
-  var tf = G('tf-'+fieldId);
-  if(tf) tf.classList.toggle('open', chk.checked);
+// Reality's fields only apply to security=reality. prefix: 's' or 'a'.
+function toggleReality(prefix) {
+  var on = G(prefix + '_security').value === 'reality';
+  document.querySelectorAll('.' + prefix + '-reality').forEach(function(el){
+    el.classList.toggle('open', on);
+  });
 }
 function dlText(filename, content) {
   // Inside Telegram Mini App: file downloads are not supported in WebView.
@@ -243,7 +379,7 @@ function dlText(filename, content) {
   var tg = window._tg;
   if (tg) {
     navigator.clipboard.writeText(content).then(function() {
-      toast('Copied to clipboard ✓ — paste into any app to save as ' + filename, 'ok');
+      toast(tf('m_clip_saved', { f: filename }), 'ok');
     }).catch(function() {
       // Clipboard also blocked — show content in a full-screen overlay so user can select & copy
       var box = document.createElement('div');
@@ -256,7 +392,7 @@ function dlText(filename, content) {
       area.readOnly = true;
       area.style.cssText = 'flex:1;background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;resize:none;';
       var btn = document.createElement('button');
-      btn.textContent = '✕ Close';
+      btn.textContent = t('btn_close');
       btn.style.cssText = 'flex-shrink:0;';
       btn.onclick = function() { document.body.removeChild(box); };
       box.appendChild(title); box.appendChild(area); box.appendChild(btn);
@@ -281,55 +417,85 @@ function applyRemarkTpl(tpl, ip, sni, port, idx, prefix) {
     .replace(/\{idx\}/g, String(idx));
 }
 
-// ── Navigation tabs ───────────────────────────────────────
+// ── Navigation ────────────────────────────────────────────
+const _ROUTE = ['gen','check','export','library'];
+
 function navTab(name) {
-  ['gen','profiles','bulk','tools','uuids'].forEach(function(n){
+  var from = _ROUTE.findIndex(function(n){ return G('tp-'+n).classList.contains('active'); });
+  _ROUTE.forEach(function(n){
     G('nt-'+n).classList.toggle('active', n===name);
     G('tp-'+n).classList.toggle('active', n===name);
   });
-  if(name==='profiles') renderProfiles();
-  if(name==='uuids') { renderUUIDs(); renderIPLists(); renderSNILists(); }
+  var at = _ROUTE.indexOf(name);
+  G('link1').classList.toggle('on', at===1 || at===2);
+  G('link2').classList.toggle('on', at===2);
+  routeMotion(name, from, at);
+  if(name==='library') { renderProfiles(); renderUUIDs(); renderIPLists(); renderSNILists(); renderHist(); }
+  if(name==='export') renderExport();
+  updateRoute();
+  syncThumbs();
+  window.scrollTo(0, 0);
 }
 
-function setMode(m) {
-  G('btnSimple').classList.toggle('active', m==='simple');
-  G('btnAdv').classList.toggle('active', m==='advanced');
-  G('pSimple').style.display = m==='simple' ? '' : 'none';
-  G('pAdv').style.display   = m==='advanced' ? '' : 'none';
+function subTab(group, name) {
+  var section = G('tp-'+group);
+  section.querySelectorAll('.sub').forEach(function(b){
+    b.classList.toggle('active', b.dataset.sub === group+'-'+name);
+  });
+  section.querySelectorAll('.subpanel').forEach(function(p){
+    p.classList.toggle('active', p.id === 'sp-'+group+'-'+name);
+  });
+  syncThumbs();
 }
-function advTab(name) {
-  ['gen','imp','hist'].forEach(function(n){
-    G('ap-'+n).classList.toggle('active',n===name);
-  });
-  document.querySelectorAll('.tab2').forEach(function(t){
-    var m = (t.getAttribute('onclick')||'').match(/advTab\('(\w+)'\)/);
-    t.classList.toggle('active', !!(m && m[1]===name));
-  });
-  if(name==='hist') renderHist();
+
+// Live counts on the route, so each step shows what it holds
+function updateRoute() {
+  var usable = _cfgPingResults.filter(function(r){ return r.ok || r.inconclusive; }).length;
+  G('stepBuild').textContent = _advRawLinks.length + ' ' + t('dyn_links');
+  G('stepCheck').textContent = _cfgPingResults.length ? usable + ' ' + t('step_working') : '0 ' + t('step_tested');
+  G('stepExport').textContent = t('fmt_' + _fmt).split(' ')[0];
+  var saved = ['bc_profiles','bc_uuids','bc_iplists','bc_snilists'].reduce(function(n, k){ return n + lsGetArr(k).length; }, 0);
+  G('stepLibrary').textContent = saved + ' ' + t('step_saved');
+}
+
+// Sends the generated links straight into a test
+function checkLinks() {
+  if(!_advRawLinks.length) { toast(t('toast_generate_first'), 'err'); return; }
+  G('cfgPingInput').value = _advRawLinks.join('\n');
+  navTab('check');
+  subTab('check', 'servers');
+  runCfgPing();
 }
 
 // ── Build query params ────────────────────────────────────
 function buildParams(opts) {
   var q = [];
   var sec = opts.security||'tls';
-  if(opts.useEnc) q.push('encryption=none');
-  q.push('security='+sec);
+  if(opts.useEnc) q.push('encryption='+encodeURIComponent(opts.enc||'none'));
+  q.push('security='+encodeURIComponent(sec));
   if(sec!=='none'){
     if(opts.sni)  q.push('sni='+encodeURIComponent(opts.sni));
-    if(opts.fp)   q.push('fp='+opts.fp);
+    if(opts.fp)   q.push('fp='+encodeURIComponent(opts.fp));
     if(opts.alpn) q.push('alpn='+encodeURIComponent(opts.alpn));
     q.push('insecure='+(opts.insecure?'1':'0'));
     q.push('allowInsecure='+(opts.insecure?'1':'0'));
   }
+  if(sec==='reality'){
+    if(opts.pbk) q.push('pbk='+encodeURIComponent(opts.pbk));
+    if(opts.sid) q.push('sid='+encodeURIComponent(opts.sid));
+    if(opts.spx) q.push('spx='+encodeURIComponent(opts.spx));
+  }
+  if(opts.flow) q.push('flow='+encodeURIComponent(opts.flow));
   var type = opts.type||'tcp';
-  if(type!=='tcp') q.push('type='+type);
+  if(type!=='tcp') q.push('type='+encodeURIComponent(type));
   if(opts.host) q.push('host='+encodeURIComponent(opts.host));
-  var showPath = ['xhttp','ws','httpupgrade','splithttp'].indexOf(type)>-1;
+  var showPath = _PATH_TYPES.indexOf(type)>-1;
   if(showPath && opts.path) q.push('path='+encodeURIComponent(opts.path||'/'));
   var isX = type==='xhttp'||type==='splithttp';
-  if(isX && opts.mode && opts.mode!=='auto') q.push('mode='+opts.mode);
+  if(isX && opts.mode && opts.mode!=='auto') q.push('mode='+encodeURIComponent(opts.mode));
   if(isX && opts.extra) q.push('extra='+encodeURIComponent(opts.extra));
   if(type==='grpc' && opts.grpc) q.push('serviceName='+encodeURIComponent(opts.grpc));
+  (opts.pass||[]).forEach(function(kv){ q.push(encodeURIComponent(kv[0])+'='+encodeURIComponent(kv[1])); });
   return q;
 }
 
@@ -337,14 +503,6 @@ function buildParams(opts) {
 function renderQR(canvasId,link) {
   QRCode.toCanvas(G(canvasId),link,{width:160,margin:1,color:{dark:'#000',light:'#fff'}});
 }
-function updateSQr() {
-  if(!sQrLinks.length) return;
-  renderQR('sQr',sQrLinks[sQrCur]);
-  G('sQrIdx').textContent=(sQrCur+1)+' / '+sQrLinks.length;
-  G('sQrNav').style.display=sQrLinks.length>1?'flex':'none';
-}
-function sQrPrev(){ if(sQrCur>0){ sQrCur--; updateSQr(); } }
-function sQrNext(){ if(sQrCur<sQrLinks.length-1){ sQrCur++; updateSQr(); } }
 function updateAQr() {
   if(!aQrLinks.length) return;
   renderQR('aQr',aQrLinks[aQrCur]);
@@ -354,196 +512,34 @@ function updateAQr() {
 function aQrPrev(){ if(aQrCur>0){ aQrCur--; updateAQr(); } }
 function aQrNext(){ if(aQrCur<aQrLinks.length-1){ aQrCur++; updateAQr(); } }
 
-// ── SIMPLE: Parse ─────────────────────────────────────────
-function simpleParse() {
-  var raw = G('sUri').value.trim();
-  G('sEditor').style.display='none';
-  G('sStatus').textContent='';
-  simType='tcp'; simHasEnc=false;
-  if(!raw) return;
-  if(raw.length > 8000){ toast('Input too large to parse','err'); return; }
-  if(!raw.startsWith('vless://')){
-  G('sStatus').textContent = '';
-  var errSpan = document.createElement('span');
-  errSpan.style.color = 'var(--red)';
-  errSpan.textContent = (typeof t==='function'?t('dyn_uri_must_vless'):'✕ URI must start with vless://');
-  G('sStatus').appendChild(errSpan);
-  return;
-  }
-  try {
-    var u = new URL(raw.replace(/^vless:\/\//,'https://'));
-    var p = new URLSearchParams(u.search);
-    simType   = p.get('type')||'tcp';
-    simHasEnc = !!(p.get('encryption'));
-    G('s_uuid').value = u.username||'';
-    G('s_port').value = u.port||'443';
-    G('s_ip').value   = u.hostname||'';
-    G('s_sni').value  = p.get('sni')  ? decodeURIComponent(p.get('sni'))  : '';
-    G('s_host').value = p.get('host') ? decodeURIComponent(p.get('host')) : '';
-    G('s_path').value = p.get('path') ? decodeURIComponent(p.get('path')) : '/';
-    setOptVal(G('s_security'), p.get('security')||'tls');
-    setOptVal(G('s_fp'),       p.get('fp')||'');
-    setOptVal(G('s_alpn'),     p.get('alpn') ? decodeURIComponent(p.get('alpn')) : '');
-    G('s_insecure').checked = (p.get('allowInsecure')||p.get('insecure'))==='1';
-    G('s_remark').value = decodeURIComponent(u.hash.slice(1)||'');
-    var isX = simType==='xhttp'||simType==='splithttp';
-    G('sw_mode').style.display  = isX ? '' : 'none';
-    G('sw_extra').style.display = isX ? '' : 'none';
-    G('sw_grpc').style.display  = simType==='grpc' ? '' : 'none';
-    if(isX){ setOptVal(G('s_mode'),p.get('mode')||'auto'); G('s_extra').value=p.get('extra')?decodeURIComponent(p.get('extra')):''; }
-    if(simType==='grpc') G('s_grpc').value=p.get('serviceName')||'';
-    G('sTypeBadge').textContent = simType.toUpperCase()+(typeof t==='function'?t('dyn_transport_badge'):' transport');
-    G('sEditor').style.display  = '';
-    G('sStatus').textContent = '';
-    var okSpan = document.createElement('span');
-    okSpan.style.color = 'var(--green)';
-    okSpan.textContent = (typeof t==='function'?t('dyn_loaded_type'):'✓ Loaded — type: ')+simType;
-    G('sStatus').appendChild(okSpan);
-    toast(typeof t==='function'?t('toast_loaded_successfully'):'Loaded successfully','ok');
-  } catch(e) {
-    G('sStatus').textContent = '';
-    var failSpan = document.createElement('span');
-    failSpan.style.color = 'var(--red)';
-    failSpan.textContent = (typeof t==='function'?t('dyn_parse_failed'):'✕ Failed to parse URI');
-    G('sStatus').appendChild(failSpan);
-  }
-}
-
-// ── SIMPLE: Generate ──────────────────────────────────────
-function simpleRegen() {
-  var uuid = G('s_uuid').value.trim();
-  if(!uuid){ toast(typeof t==='function'?t('toast_uuid_required'):'UUID is required','err'); return; }
-  if(!validateUUID('s_uuid')){ toast(typeof t==='function'?t('toast_invalid_uuid'):'Invalid UUID format','err'); return; }
-  var portVal = parseInt(G('s_port').value.trim(),10);
-  if(!portVal||portVal<1||portVal>65535){ toast(typeof t==='function'?t('toast_port_invalid'):'Port must be 1–65535','err'); G('s_port').classList.add('invalid'); return; }
-  G('s_port').classList.remove('invalid');
-  var port     = String(portVal);
-  var ips      = linesOfExpanded('s_ip');
-  var snis     = linesOf('s_sni');
-  if(ips.length===0){ toast(typeof t==='function'?t('toast_add_ip'):'Add at least one IP / Host','err'); return; }
-  var host     = G('s_host').value.trim();
-  var path     = G('s_path').value.trim()||'/';
-  var security = G('s_security').value;
-  var fp       = G('s_fp').value;
-  var alpn     = G('s_alpn').value;
-  var insecure = G('s_insecure').checked;
-  var tpl      = G('s_remark').value.trim();
-  var mode     = G('s_mode').value;
-  var extra    = G('s_extra').value.trim();
-  var grpc     = G('s_grpc').value.trim();
-  var sniList  = snis.length ? snis : [''];
-  var paired = G('s_pairMode').checked;
-  var estimatedCount = paired ? Math.max(ips.length, sniList.length) : ips.length * sniList.length;
-  if(estimatedCount > 50000) {
-    toast((typeof t==='function'?t('toast_generating_too_many'):'Cannot generate more than 50,000 links at once — reduce your IP or SNI list.'), 'err');
-    return;
-  }
-  if(estimatedCount > 15000) {
-    if(!confirm(estimatedCount.toLocaleString() + (typeof t==='function'?t('dyn_confirm_large'):' links will be generated.\nThis may take a moment and use significant memory.\n\nContinue?'))) return;
-  }
-  var out=[],idx=1;
-  if(paired && snis.some(function(s){ return s !== ''; })){
-    ips.forEach(function(ip,i){
-      var sni=sniList[i%sniList.length]||'';
-      var q=buildParams({useEnc:simHasEnc,security:security,sni:sni,fp:fp,alpn:alpn,insecure:insecure,type:simType,host:host,path:path,mode:mode,extra:extra,grpc:grpc});
-      var remark=applyRemarkTpl(tpl,ip,sni,port,idx,G('s_prefix')?G('s_prefix').value.trim():'');
-      out.push('vless://'+uuid+'@'+ip+':'+port+'?'+q.join('&')+'#'+encodeURIComponent(remark));
-      idx++;
-    });
-  } else {
-    ips.forEach(function(ip){
-      sniList.forEach(function(sni){
-        var q=buildParams({useEnc:simHasEnc,security:security,sni:sni,fp:fp,alpn:alpn,insecure:insecure,type:simType,host:host,path:path,mode:mode,extra:extra,grpc:grpc});
-        var remark=applyRemarkTpl(tpl,ip,sni,port,idx,G('s_prefix')?G('s_prefix').value.trim():'');
-        out.push('vless://'+uuid+'@'+ip+':'+port+'?'+q.join('&')+'#'+encodeURIComponent(remark));
-        idx++;
-      });
-    });
-  }
-  var txt=out.join('\n');
-  var sOut = G('sOut');
-  sOut.textContent = '';
-  var frag = document.createDocumentFragment();
-  out.forEach(function(link) {
-    var row = document.createElement('div');
-    row.className = 'out-row';
-    var textSpan = document.createElement('span');
-    textSpan.className = 'out-row-text';
-    textSpan.textContent = link;
-    var copySpan = document.createElement('span');
-    copySpan.className = 'out-row-copy';
-    copySpan.textContent = '⎘';
-    copySpan.addEventListener('click', function(e) {
-      e.stopPropagation();
-      safeClipboard(textSpan.textContent).then(function(){ toast('Copied!','ok'); }).catch(function(){ toast('Copy failed','err'); });
-    });
-    row.appendChild(textSpan);
-    row.appendChild(copySpan);
-    frag.appendChild(row);
-  });
-  sOut.classList.remove('empty');
-  sOut.appendChild(frag);
-  G('sBadge').textContent=out.length+' '+(typeof t==='function'?t('dyn_link'):'link')+(out.length!==1&&_currentLang==='en'?'s':'');
-  G('sStats').style.display='';
-  G('sLinks').textContent=out.length; G('sIPs').textContent=ips.length; G('sSNIs').textContent=snis.length||1;
-  sQrLinks=out; sQrCur=0; updateSQr();
-  G('sQrW').classList.remove('open');
-  toast(out.length+' '+(typeof t==='function'?t('dyn_link'):'link')+(out.length!==1&&_currentLang==='en'?'s':'')+(typeof t==='function'?t('toast_generated'):' generated'),'ok');
-}
-
-function sCopy() {
-  if(G('sOut').classList.contains('empty')){ toast(typeof t==='function'?t('toast_nothing_copy'):'Nothing to copy','err'); return; }
-  safeClipboard(Array.from(G('sOut').querySelectorAll('.out-row-text')).map(function(el){ return el.textContent; }).join('\n')).then(function(){ toast('Copied!','ok'); }).catch(function(){ toast('Copy failed','err'); });
-}
-function sDl() {
-  if(G('sOut').classList.contains('empty')){ toast(typeof t==='function'?t('toast_nothing_download'):'Nothing to download','err'); return; }
-  dlText('vless_configs.txt', Array.from(G('sOut').querySelectorAll('.out-row-text')).map(function(el){ return el.textContent; }).join('\n'));
-  toast('Downloading...','ok');
-}
-function sDlB64() {
-  if(G('sOut').classList.contains('empty')){ toast(typeof t==='function'?t('toast_nothing_export'):'Nothing to export','err'); return; }
-  dlText('vless_configs_b64.txt', toBase64(Array.from(G('sOut').querySelectorAll('.out-row-text')).map(function(el){ return el.textContent; }).join('\n')));
-  toast('Base64 downloaded','ok');
-}
-function sQR() {
-  if(G('sOut').classList.contains('empty')){ toast(typeof t==='function'?t('toast_generate_first'):'Generate first','err'); return; }
-  G('sQrW').classList.toggle('open');
-}
-function clearSimple() {
-  G('sUri').value=''; G('sEditor').style.display='none'; G('sStatus').textContent='';
-  G('sOut').textContent=typeof t==='function'?t('output_empty'):'Your generated links will appear here.'; G('sOut').classList.add('empty');
-  G('sBadge').textContent='0 '+(typeof t==='function'?t('dyn_links'):'links'); G('sStats').style.display='none'; G('sQrW').classList.remove('open');
-  simType='tcp'; simHasEnc=false; sQrLinks=[]; sQrCur=0;
-  toast(typeof t==='function'?t('toast_cleared'):'Cleared','ok');
-}
-
-// ── ADVANCED: Transport type ──────────────────────────────
+// ── Transport type ──────────────────────────────
 function aType(type) {
+  if(type!==advType) advPass=[]; // kept params belong to the transport they came with
   advType=type;
   document.querySelectorAll('.pill').forEach(function(p){ p.classList.toggle('active',p.textContent===type); });
   var showPath=['xhttp','ws','httpupgrade','splithttp'].indexOf(type)>-1;
   var showHost=['xhttp','ws','httpupgrade','splithttp','grpc'].indexOf(type)>-1;
   var showX=type==='xhttp'||type==='splithttp';
+  syncThumbs();
   G('a_xhttpF').style.display   = showX          ? '':'none';
   G('a_grpcF').style.display    = type==='grpc'  ? '':'none';
   G('a_pathRow').style.display  = showPath       ? '':'none';
-  G('tf-a_path').style.display  = showPath       ? '':'none';
   G('a_hostRow').style.display  = showHost       ? '':'none';
-  G('tf-a_host').style.display  = showHost       ? '':'none';
 }
 
-// ── ADVANCED: Generate ────────────────────────────────────
+// ── Generate ────────────────────────────────────
 function advGen() {
   var uuid = G('a_uuid').value.trim();
-  if(!uuid){ toast('UUID is required','err'); return; }
-  if(!validateUUID('a_uuid')){ toast('Invalid UUID format','err'); return; }
+  if(!uuid){ toast(t('toast_uuid_required'),'err'); return; }
+  if(!validateUUID('a_uuid')){ toast(t('toast_invalid_uuid'),'err'); return; }
   var portVal=parseInt(G('a_port').value.trim(),10);
-  if(!portVal||portVal<1||portVal>65535){ toast('Port must be 1–65535','err'); return; }
+  if(!portVal||portVal<1||portVal>65535){ toast(t('toast_port_invalid'),'err'); return; }
   var port=String(portVal);
-  var useIps=G('a_useIps').checked, useSnis=G('a_useSnis').checked;
-  var ips=useIps?linesOfExpanded('a_ips'):[], snis=useSnis?linesOf('a_snis'):[];
-  if(useIps&&ips.length===0){ toast('IPs list is empty','err'); return; }
-  if(useSnis&&snis.length===0){ toast('SNI list is empty','err'); return; }
+  var ips=linesOfExpanded('a_ips'), snis=linesOf('a_snis');
+  if(!ips.length){ toast(t('toast_add_ip'),'err'); return; }
+  if(!rangesExpanded(ips)) return;
+  var pbk      = G('a_pbk').value.trim();
+  if(G('a_security').value==='reality' && !pbk){ toast(t('toast_reality_pbk'),'err'); return; }
   var tpl      = G('a_prefix').value.trim();
   var prefixVal = G('a_prefix_val') ? G('a_prefix_val').value.trim() : '';
   var security = G('a_security').value;
@@ -551,11 +547,14 @@ function advGen() {
   var alpn     = G('a_alpn').value;
   var insecure = G('a_insecure').checked;
   var useEnc   = G('a_encryption').checked;
-  var host     = G('a_useHost').checked ? G('a_host').value.trim() : '';
-  var path     = G('a_usePath').checked ? (G('a_path').value.trim()||'/') : '';
+  var host     = G('a_host').value.trim();
+  var path     = G('a_path').value.trim()||'/';
   var mode     = G('a_mode').value;
-  var extra    = G('a_useExtra').checked ? G('a_extra').value.trim() : '';
+  var extra    = G('a_extra').value.trim();
   var grpc     = G('a_grpc').value.trim();
+  var flow     = G('a_flow').value;
+  var sid      = G('a_sid').value.trim();
+  var spx      = G('a_spx').value.trim();
   var ipList   = ips.length ? ips : [''];
   var sniList  = snis.length ? snis : [''];
   // Warn before generating very large outputs — matrix mode can produce
@@ -563,56 +562,44 @@ function advGen() {
   var paired=G('a_pairMode').checked;
   var estimatedCount = paired ? Math.max(ipList.length, sniList.length) : ipList.filter(Boolean).length * sniList.length;
   if(estimatedCount > 50000) {
-    toast((typeof t==='function'?t('toast_generating_too_many'):'Cannot generate more than 50,000 links at once — reduce your IP or SNI list.'), 'err');
+    toast(t('toast_generating_too_many'), 'err');
     return;
   }
   if(estimatedCount > 15000) {
-    if(!confirm(estimatedCount.toLocaleString() + (typeof t==='function'?t('dyn_confirm_large'):' links will be generated.\nThis may take a moment and use significant memory.\n\nContinue?'))) return;
+    if(!confirm(estimatedCount.toLocaleString() + t('dyn_confirm_large'))) return;
   }
   var out=[],idx=1;
-  if(paired && snis.some(function(s){ return s !== ''; })){
-    ipList.forEach(function(ip,i){
-      if(!ip) return;
-      var addr=ip+':'+port;
-      var sni=sniList[i%sniList.length]||'';
-      var q=buildParams({useEnc:useEnc,security:security,sni:sni,fp:fp,alpn:alpn,insecure:insecure,type:advType,host:host,path:path,mode:mode,extra:extra,grpc:grpc});
-      var remark=applyRemarkTpl(tpl,ip,sni,port,idx,prefixVal);
-      out.push('vless://'+uuid+'@'+addr+'?'+q.join('&')+'#'+encodeURIComponent(remark));
-      idx++;
-    });
-  } else {
-    ipList.forEach(function(ip){
-      if(!ip) return;
-      var addr=ip+':'+port;
-      sniList.forEach(function(sni){
-        var q=buildParams({useEnc:useEnc,security:security,sni:sni,fp:fp,alpn:alpn,insecure:insecure,type:advType,host:host,path:path,mode:mode,extra:extra,grpc:grpc});
-        var remark=applyRemarkTpl(tpl,ip,sni,port,idx,prefixVal);
-        out.push('vless://'+uuid+'@'+addr+'?'+q.join('&')+'#'+encodeURIComponent(remark));
-        idx++;
-      });
-    });
-  }
+  pairsOf(ips,snis,paired).forEach(function(pair){
+    var ip=pair[0], sni=pair[1];
+    var q=buildParams({useEnc:useEnc,enc:advEnc,security:security,sni:sni,fp:fp,alpn:alpn,insecure:insecure,type:advType,host:host,path:path,mode:mode,extra:extra,grpc:grpc,flow:flow,pbk:pbk,sid:sid,spx:spx,pass:advPass});
+    var remark=applyRemarkTpl(tpl,ip,sni,port,idx,prefixVal);
+    out.push('vless://'+uuid+'@'+formatHost(ip)+':'+port+'?'+q.join('&')+'#'+encodeURIComponent(remark));
+    idx++;
+  });
   var txt=out.join('\n');
   G('aLinks').textContent=out.length;
   G('aIPs').textContent=ipList.filter(Boolean).length;
   G('aSNIs').textContent=sniList.filter(Boolean).length;
   aQrLinks=out; aQrCur=0; updateAQr();
-  G('aQrW').classList.remove('open'); G('aQrBtn').textContent='⬛ QR';
+  G('aQrW').classList.remove('open'); G('aQrBtn').textContent=t('btn_qr');
   // Store canonical link list for filter/sort/shuffle; reset UI controls
   _advRawLinks = out.slice();
   _outRenderUnlocked = false; // reset "Show all" state for the new result set
   _resetAdvFilterSort();
   // Use renderAdvOut so dataset.plain is always set (required for Clash/Singbox/download/filter)
   renderAdvOut(out);
-  hist.unshift({time:new Date().toLocaleTimeString(),count:out.length,first:out[0]||'',all:txt});
+  staggerIn(G('aOut').querySelectorAll('.out-row'));
+  once(G('genBtn'), 'sheen', 700);
+  hist.unshift({time:Date.now(),count:out.length,first:out[0]||'',all:txt});
   if(hist.length>20) hist.pop();
-  lsSet('bc_hist', hist);
-  toast(out.length+' '+(typeof t==='function'?t('dyn_config'):'config')+(out.length!==1&&_currentLang==='en'?'s':'')+(typeof t==='function'?t('toast_generated'):' generated'),'ok');
+  updateRoute();
+  if(!lsSet('bc_hist', hist)) return; // keep the storage warning on screen
+  toast(out.length+' '+t('dyn_config')+(out.length!==1&&_currentLang==='en'?'s':'')+t('toast_generated'),'ok');
 }
 
-function advQR(){ if(G('aOut').classList.contains('empty')){ toast(typeof t==='function'?t('toast_generate_first'):'Generate first','err'); return; } G('aQrW').classList.toggle('open'); G('aQrBtn').textContent=G('aQrW').classList.contains('open')?(typeof t==='function'?t('dyn_hide_qr'):'✕ Hide QR'):(typeof t==='function'?t('dyn_show_qr'):'⬛ QR'); }
+function advQR(){ if(G('aOut').classList.contains('empty')){ toast(t('toast_generate_first'),'err'); return; } G('aQrW').classList.toggle('open'); G('aQrBtn').textContent=G('aQrW').classList.contains('open')?t('dyn_hide_qr'):t('dyn_show_qr'); }
 function advCopyOut() {
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to copy','err'); return; }
+  if(G('aOut').classList.contains('empty')){ toast(t('toast_nothing_copy'),'err'); return; }
 
   // Always use _advRawLinks — the canonical source (reflects shuffle/sort order).
   // Filter reduces to the visible subset when a filter query is active.
@@ -622,307 +609,295 @@ function advCopyOut() {
     : _advRawLinks.join('\n');
 
   safeClipboard(txt)
-    .then(function(){ toast('Copied!','ok'); })
-    .catch(function(){ toast('Copy failed','err'); });
-}
-function advDl(){
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to download','err'); return; }
-  var q = G('aOutFilter').value.trim().toLowerCase();
-  var content = q
-    ? _advRawLinks.filter(function(l){ return l.toLowerCase().indexOf(q) > -1; }).join('\n')
-    : (G('aOut').dataset.plain || '');
-  var isFiltered = q !== '';
-  var filename = isFiltered ? 'vless_filtered.txt' : 'vless_configs.txt';
-  var count = content.split('\n').filter(Boolean).length;
-  dlText(filename, content);
-  toast((typeof t==='function'?t('toast_downloaded'):'Downloaded') + ' ' + count + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (count !== 1 && _currentLang === 'en' ? 's' : '') + (isFiltered ? (typeof t==='function'?t('dyn_filtered'):' (filtered)') : ''), 'ok');
-}
-// Download only what's currently visible — respects active filter/sort/shuffle
-function advDlFiltered() {
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to download','err'); return; }
-  
-  var q = G('aOutFilter').value.trim().toLowerCase();
-  var visible = _advRawLinks.filter(function(l){
-    return q ? l.toLowerCase().indexOf(q) > -1 : true;
-  });
-  
-  if(!visible.length){ toast('Nothing visible to download','err'); return; }
-  var isFiltered = q !== '';
-  var filename = isFiltered ? 'vless_filtered.txt' : 'vless_configs.txt';
-  dlText(filename, visible.join('\n'));
-  toast((typeof t==='function'?t('toast_downloaded'):'Downloaded') + ' ' + visible.length + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (visible.length !== 1 && _currentLang === 'en' ? 's' : '') + (isFiltered ? (typeof t==='function'?t('dyn_filtered'):' (filtered)') : ''), 'ok');
-}
-function advDlB64(){
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to export','err'); return; }
-  dlText('vless_configs_b64.txt', toBase64(G('aOut').dataset.plain || ''));
-  toast('Base64 downloaded','ok');
-}
-function advDlJSON(){
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to export','err'); return; }
-  var links = (G('aOut').dataset.plain || '').split('\n').filter(Boolean);
-  var arr = links.map(function(l){
-    try{
-      var u=new URL(l.replace(/^vless:\/\//,'https://'));
-      var p=new URLSearchParams(u.search);
-      return { uuid:u.username, address:u.hostname, port:parseInt(u.port||'443', 10), security:p.get('security')||'tls', sni:p.get('sni')||'', fp:p.get('fp')||'', alpn:p.get('alpn')||'', type:p.get('type')||'tcp', host:p.get('host')||'', path:p.get('path')||'/', remark:decodeURIComponent(u.hash.slice(1)||''), raw:l };
-    }catch(e){ return {raw:l}; }
-  });
-  dlText('vless_configs.json', JSON.stringify(arr,null,2));
-  toast('JSON downloaded','ok');
+    .then(function(){ flashCopied(G('copyOutBtn')); })
+    .catch(function(){ toast(t('m_copy_failed'),'err'); });
 }
 function advClear(){
-  ['a_uuid','a_ips','a_snis','a_host','a_prefix','a_prefix_val','a_grpc'].forEach(function(id){ var e=G(id); if(e) e.value=''; });
+  ['a_uuid','a_ips','a_snis','a_host','a_prefix','a_prefix_val','a_grpc','a_pbk','a_sid','a_spx','impUri'].forEach(function(id){ G(id).value=''; });
   G('a_port').value='443'; G('a_path').value='/'; G('a_extra').value='{"xPaddingBytes":"100-1000"}';
-  G('aOut').textContent=typeof t==='function'?t('adv_output_empty'):'Nothing generated yet.'; G('aOut').classList.add('empty'); G('aOut').dataset.plain='';
-  G('aBadge').textContent='0 '+(typeof t==='function'?t('dyn_links'):'links'); G('aLinks').textContent=G('aIPs').textContent=G('aSNIs').textContent='0';
-  G('aQrW').classList.remove('open'); G('aQrBtn').textContent='⬛ QR';
+  setOptVal(G('a_flow'),''); advEnc='none'; advPass=[];
+  G('parts').hidden=true;
+  _pasteHint();
+  G('aOut').textContent=t('adv_output_empty'); G('aOut').classList.add('empty'); G('aOut').dataset.plain='';
+  G('aBadge').textContent='0 '+t('dyn_links'); G('aLinks').textContent=G('aIPs').textContent=G('aSNIs').textContent='0';
+  G('aQrW').classList.remove('open'); G('aQrBtn').textContent=t('btn_qr');
   aQrLinks=[]; aQrCur=0;
   _advRawLinks=[]; _outRenderUnlocked=false; _resetAdvFilterSort();
-  toast(typeof t==='function'?t('toast_cleared'):'Cleared','ok');
+  _liveCountNow(); updateRoute();
+  toast(t('toast_cleared'),'ok');
 }
 
-// ── ADVANCED: Parse ───────────────────────────────────────
-function advParse(){
-  var raw=G('impUri').value.trim();
-  if(!raw){ toast(typeof t==='function'?t('toast_parse_uri_first'):'Paste a URI first','err'); return; }
-  if(raw.length > 8000){ toast(typeof t==='function'?t('toast_input_too_large'):'Input too large to parse','err'); return; }
-  if(!raw.startsWith('vless://')){ toast(typeof t==='function'?t('toast_must_start_vless'):'Must start with vless://','err'); return; }
-  try{
-    var u=new URL(raw.replace(/^vless:\/\//,'https://'));
-    var p=new URLSearchParams(u.search);
-    parsedD={ uuid:u.username||'', ip:u.hostname||'', port:u.port||'443', encryption:p.get('encryption')||'', security:p.get('security')||'tls', sni:p.get('sni')?decodeURIComponent(p.get('sni')):'', fp:p.get('fp')||'', alpn:p.get('alpn')?decodeURIComponent(p.get('alpn')):'', insecure:p.get('allowInsecure')||p.get('insecure')||'0', type:p.get('type')||'tcp', host:p.get('host')?decodeURIComponent(p.get('host')):'', path:p.get('path')?decodeURIComponent(p.get('path')):'/', mode:p.get('mode')||'', extra:p.get('extra')?decodeURIComponent(p.get('extra')):'', serviceName:p.get('serviceName')||'', remark:decodeURIComponent(u.hash.slice(1)||'') };
-    var parseRows = G('parseRows');
-    parseRows.textContent = '';
-    var parseFrag = document.createDocumentFragment();
-    Object.entries(parsedD).forEach(function(kv) {
-      var row = document.createElement('div');
-      row.className = 'parse-row';
-      var keySpan = document.createElement('span');
-      keySpan.className = 'parse-key';
-      keySpan.textContent = kv[0];
-      var valSpan = document.createElement('span');
-      valSpan.className = 'parse-val';
-      if(kv[1]) {
-        valSpan.textContent = String(kv[1]);
-      } else {
-        valSpan.style.color = 'var(--muted)';
-        valSpan.textContent = '—';
-      }
-      row.appendChild(keySpan);
-      row.appendChild(valSpan);
-      parseFrag.appendChild(row);
-    });
-    parseRows.appendChild(parseFrag);
-    G('parsePrev').style.display='';
-    toast(typeof t==='function'?t('toast_parsed_ok'):'Parsed successfully','ok');
-  }catch(e){ toast(typeof t==='function'?t('toast_parse_failed'):'Failed to parse URI','err'); parsedD=null; }
+// ── Paste detection ───────────────────────────────────────
+// The paste box accepts anything: it works out what it was given and routes it.
+function _pasteStatus(state, msg) {
+  var el = G('pasteStatus');
+  el.className = 'detect ' + state;
+  el.textContent = msg;
 }
-function applyParsed(){
-  if(!parsedD){ toast(typeof t==='function'?t('toast_nothing_parsed'):'Nothing parsed','err'); return; }
-  G('a_uuid').value=parsedD.uuid; G('a_ips').value=parsedD.ip; G('a_port').value=parsedD.port;
-  G('a_prefix').value=parsedD.remark||'';
-  G('a_snis').value=parsedD.sni; G('a_host').value=parsedD.host; G('a_path').value=parsedD.path||'/';
-  setOptVal(G('a_security'),parsedD.security||'tls'); setOptVal(G('a_fp'),parsedD.fp); setOptVal(G('a_alpn'),parsedD.alpn);
-  G('a_insecure').checked=parsedD.insecure==='1'; G('a_encryption').checked=!!parsedD.encryption;
-  var hasIp=!!parsedD.ip; G('a_useIps').checked=hasIp; G('tf-a_ips').classList.toggle('open',hasIp);
-  var hasSni=!!parsedD.sni; G('a_useSnis').checked=hasSni; G('tf-a_snis').classList.toggle('open',hasSni);
-  var hasHost=!!parsedD.host; G('a_useHost').checked=hasHost; G('tf-a_host').classList.toggle('open',hasHost);
-  var hasPath=!!parsedD.path; G('a_usePath').checked=hasPath; G('tf-a_path').classList.toggle('open',hasPath);
-  aType(parsedD.type||'tcp');
-  if((parsedD.type==='xhttp'||parsedD.type==='splithttp')&&parsedD.mode) setOptVal(G('a_mode'),parsedD.mode);
-  if(parsedD.extra){ G('a_extra').value=parsedD.extra; G('a_useExtra').checked=true; G('tf-a_extra').classList.add('open'); }
-  if(parsedD.serviceName) G('a_grpc').value=parsedD.serviceName;
-  advTab('gen');
-  toast(typeof t==='function'?t('toast_applied'):'Applied — ready to generate','ok');
+
+// With an empty paste box, offers an example link. It uses a reserved documentation address.
+function _pasteHint() {
+  if(G('impUri').value.trim()) return;
+  _pasteStatus('', t('paste_hint'));
+  var b = document.createElement('button');
+  b.className = 'mini-btn accent';
+  b.textContent = t('paste_try');
+  b.addEventListener('click', function() {
+    G('impUri').value = 'vless://' + genUUID() + '@203.0.113.10:443?security=tls&sni=cdn.example.com&fp=chrome&type=ws&path=%2Fws#Example';
+    smartPaste();
+    G('impUri').focus();
+  });
+  G('pasteStatus').appendChild(b);
+}
+
+function _openInCheck(links) {
+  G('cfgPingInput').value = links.join('\n');
+  navTab('check');
+  subTab('check', 'servers');
+  toast(t('paste_many').replace('{n}', links.length), 'ok');
+}
+
+function smartPaste() {
+  var raw = G('impUri').value.trim();
+  G('parts').hidden = true;
+  if(!raw) { _pasteHint(); return; }
+  if(raw.length > 2000000) { _pasteStatus('bad', t('toast_input_too_large')); return; }
+  var lines = raw.split('\n').map(function(x){ return x.trim(); }).filter(Boolean);
+  var links = lines.filter(function(x){ return /^vless:\/\//i.test(x); });
+  if(links.length > 1) { _pasteStatus('ok', t('paste_many').replace('{n}', links.length)); _openInCheck(links); return; }
+  if(links.length === 1) {
+    var c = parseVless(links[0]);
+    if(!c) { _pasteStatus('bad', t('toast_parse_failed')); return; }
+    applyLink(c);
+    renderParts(c);
+    _pasteStatus('ok', t('paste_link'));
+    return;
+  }
+  if(/^https?:\/\//i.test(raw)) {
+    _pasteStatus('ok', t('paste_url'));
+    var fetchBtn = document.createElement('button');
+    fetchBtn.className = 'mini-btn';
+    fetchBtn.textContent = t('paste_fetch');
+    fetchBtn.addEventListener('click', function(){
+      G('subUrlInput').value = raw;
+      navTab('check'); subTab('check', 'import'); bulkSwitchTab('url');
+      fetchSubUrl();
+    });
+    G('pasteStatus').appendChild(fetchBtn);
+    return;
+  }
+  if(/^[A-Za-z0-9+\/=_-]{16,}$/.test(raw.replace(/\s/g, ''))) {
+    var decoded = [];
+    try { decoded = fromBase64(raw).split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return /^vless:\/\//i.test(x); }); } catch(e) {}
+    if(decoded.length) { _pasteStatus('ok', t('paste_many').replace('{n}', decoded.length)); _openInCheck(decoded); return; }
+  }
+  _pasteStatus('bad', t('paste_bad'));
+}
+
+// Fills the form from a parsed link. Every field is set, so nothing from the previous
+// config carries over.
+function applyLink(c) {
+  G('a_uuid').value = c.uuid; G('a_uuid').classList.remove('invalid');
+  G('a_ips').value = c.address; G('a_port').value = c.port;
+  G('a_prefix').value = c.remark; G('a_snis').value = c.sni;
+  G('a_host').value = c.host; G('a_path').value = c.path;
+  setOptVal(G('a_security'), c.security); setOptVal(G('a_fp'), c.fp); setOptVal(G('a_alpn'), c.alpn);
+  setOptVal(G('a_flow'), c.flow);
+  G('a_pbk').value = c.pbk; G('a_sid').value = c.sid; G('a_spx').value = c.spx;
+  toggleReality('a');
+  G('a_insecure').checked = c.insecure; G('insecureNote').hidden = !c.insecure;
+  G('a_encryption').checked = !!c.encryption;
+  advEnc = c.encryption || 'none';
+  aType(c.type);
+  advPass = c.pass;
+  setOptVal(G('a_mode'), c.mode || 'auto');
+  G('a_extra').value = c.extra;
+  G('a_grpc').value = c.serviceName;
+  liveCount();
+}
+
+// After a language change, relabels the breakdown without touching what the user edited
+let _lastLink = null;
+function refreshPaste() {
+  if(G('parts').hidden || !_lastLink) return;
+  renderParts(_lastLink);
+  _pasteStatus('ok', t('paste_link'));
+}
+
+// Shows the pasted link split into its parts. Clicking a part jumps to its field.
+function renderParts(c) {
+  var el = G('parts');
+  _lastLink = c;
+  var fresh = el.dataset.was !== c.uuid + c.address;
+  el.dataset.was = c.uuid + c.address;
+  el.classList.toggle('fresh', fresh);
+  el.textContent = '';
+  function sep(text) {
+    var s = document.createElement('span');
+    s.className = 'sep'; s.textContent = text;
+    s.style.setProperty('--i', el.children.length);
+    el.appendChild(s);
+  }
+  function part(value, labelKey, fieldId) {
+    var b = document.createElement('button');
+    b.className = 'tok';
+    var v = document.createElement('i'); v.textContent = value;
+    var l = document.createElement('small'); l.textContent = t(labelKey);
+    b.appendChild(v); b.appendChild(l);
+    b.style.setProperty('--i', el.children.length);
+    b.addEventListener('click', function(){ G(fieldId).focus(); });
+    el.appendChild(b);
+  }
+  sep('vless://');
+  part(c.uuid.slice(0, 8) + '…', 'label_uuid', 'a_uuid');
+  sep('@'); part(c.address, 'label_address', 'a_ips');
+  sep(':'); part(c.port, 'label_port', 'a_port');
+  sep('?'); part(c.security, 'label_security', 'a_security');
+  sep('&'); part(c.type, 'label_type', 'a_security');
+  if(c.remark) { sep('#'); part(c.remark, 'label_remark', 'a_prefix'); }
+  el.hidden = false;
+}
+
+// ── List rows ─────────────────────────────────────────────
+// o: { title, meta, metaMono, tag, tagOn, titleInput, actions:[{label,run}], pick }
+function listItem(o) {
+  var item = document.createElement('div');
+  item.className = 'hist-item' + (o.pick ? ' pick' : '');
+  if(o.pick) item.addEventListener('click', o.pick);
+  var main = document.createElement('div');
+  main.className = 'item-main';
+  if(o.titleInput) { main.appendChild(o.titleInput); }
+  else {
+    var title = document.createElement('b');
+    title.textContent = o.title;
+    main.appendChild(title);
+  }
+  if(o.meta) {
+    var meta = document.createElement('small');
+    if(o.metaMono) meta.className = 'mono';
+    meta.textContent = o.meta;
+    main.appendChild(meta);
+  }
+  item.appendChild(main);
+  if(o.tag) {
+    var tag = document.createElement('span');
+    tag.className = 'tag' + (o.tagOn ? ' on' : '');
+    tag.textContent = o.tag;
+    item.appendChild(tag);
+  }
+  (o.actions || []).forEach(function(a){
+    var b = document.createElement('button');
+    b.className = 'text-act' + (a.main ? ' main' : '');
+    b.textContent = a.label;
+    b.addEventListener('click', a.run);
+    item.appendChild(b);
+  });
+  return item;
+}
+function emptyState(el, msg) {
+  el.textContent = '';
+  var d = document.createElement('div');
+  d.className = 'empty-state';
+  d.textContent = msg;
+  el.appendChild(d);
 }
 
 // ── History ───────────────────────────────────────────────
 function renderHist(){
   var el=G('histList');
-  el.textContent = '';
-  if(!hist.length){
-    var empty = document.createElement('div');
-    empty.style.cssText = 'text-align:center;color:var(--muted);padding:32px;font-size:13px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_history'):'No history yet. Generate some configs to see them here.';
-    el.appendChild(empty);
-    return;
-  }
+  if(!hist.length){ emptyState(el, t('dyn_no_history')); return; }
   var frag = document.createDocumentFragment();
   hist.forEach(function(h, i) {
-    var item = document.createElement('div');
-    item.className = 'hist-item';
-
-    var info = document.createElement('div');
-    info.style.cssText = 'flex:1;min-width:0;';
-
-    var firstLine = document.createElement('div');
-    firstLine.style.cssText = 'font-size:11px;font-family:\'JetBrains Mono\',monospace;color:var(--accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    firstLine.textContent = h.first || '—';
-
-    var meta = document.createElement('div');
-    meta.style.cssText = 'font-size:10px;color:var(--muted);margin-top:3px;';
-    meta.textContent = h.time + ' · ' + h.count + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (h.count!==1&&_currentLang==='en'?'s':'');
-
-    info.appendChild(firstLine);
-    info.appendChild(meta);
-
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'icn sm';
-    copyBtn.textContent = '⎘';
-    (function(idx){ copyBtn.addEventListener('click', function(){ copyH(idx); }); })(i);
-
-    var loadBtn = document.createElement('button');
-    loadBtn.className = 'icn sm';
-    loadBtn.textContent = typeof t==='function'?t('dyn_load_btn'):'Load';
-    (function(idx){ loadBtn.addEventListener('click', function(){ loadH(idx); }); })(i);
-
-    item.appendChild(info);
-    item.appendChild(copyBtn);
-    item.appendChild(loadBtn);
-    frag.appendChild(item);
+    frag.appendChild(listItem({
+      title: h.count + ' ' + t('dyn_links'),
+      meta: fmtTime(h.time) + (h.first ? '  ' + getRemark(h.first) : ''),
+      actions: [
+        { label: t('btn_copy'), run: function(){ copyH(i); } },
+        { label: t('dyn_load_btn'), main: true, run: function(){ loadH(i); } }
+      ]
+    }));
   });
+  el.textContent = '';
   el.appendChild(frag);
 }
-function copyH(i){ safeClipboard(hist[i].all||hist[i].first).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Failed','err'); }); }
+function copyH(i){ safeClipboard(hist[i].all||hist[i].first).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); }); }
 function loadH(i) {
   var h = hist[i]; if(!h) return;
   var raw = h.all || h.first || '';
-  if(!raw){ toast('History entry is empty','err'); return; }
+  if(!raw){ toast(t('m_hist_empty'),'err'); return; }
   var links = raw.split('\n').filter(Boolean);
   _advRawLinks = links;
   _outRenderUnlocked = false; // reset render cap so large history entries don't freeze the browser
   renderAdvOut(links);
   _resetAdvFilterSort();
   var count = h.count || links.length;
-  G('aBadge').textContent = count + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (count !== 1 && _currentLang==='en' ? 's' : '');
+  G('aBadge').textContent = count + ' ' + t('dyn_link') + (count !== 1 && _currentLang==='en' ? 's' : '');
   G('aLinks').textContent = count;
   G('aIPs').textContent   = '—';
   G('aSNIs').textContent  = '—';
   aQrLinks = links; aQrCur = 0; updateAQr();
-  advTab('gen');
-  toast('Loaded','ok');
+  navTab('gen');
+  toast(t('m_loaded'),'ok');
 }
-function clearHist(){ hist=[]; lsSet('bc_hist',[]); renderHist(); toast('History cleared','ok'); }
+function clearHist(){
+  var previous = hist;
+  hist = [];
+  lsSet('bc_hist', []);
+  renderHist();
+  toast(t('toast_cleared'), 'ok', { label: t('undo'), run: function(){ hist = previous; lsSet('bc_hist', hist); renderHist(); } });
+}
 function exportHist(){
-  if(!hist.length){ toast('No history to export','err'); return; }
-  dlText('vless_history.txt', hist.map(function(h){ return '# '+h.time+' ('+h.count+' links)\n'+h.all; }).join('\n\n'));
-  toast('Exported','ok');
+  if(!hist.length){ toast(t('m_no_hist'),'err'); return; }
+  dlText('vless_history.txt', hist.map(function(h){ return '# '+fmtTime(h.time)+' ('+h.count+')\n'+h.all; }).join('\n\n'));
+  toast(t('m_exported'),'ok');
 }
 
 // ══════════════════════════════════════════════════════════
 // PROFILES
 // ══════════════════════════════════════════════════════════
-function saveProfile(mode){
-  _saveMode=mode;
+function saveProfile(){
   G('profileName').value='';
   G('profileModal').classList.add('open');
   setTimeout(function(){ G('profileName').focus(); },100);
 }
 function confirmSaveProfile(){
   var name=G('profileName').value.trim();
-  if(!name){ toast('Enter a profile name','err'); return; }
+  if(!name){ toast(t('m_profile_name'),'err'); return; }
   var profiles=lsGetArr('bc_profiles');
-  var data = _saveMode==='simple' ? captureSimple() : captureAdvanced();
-  data._mode=_saveMode;
-  data._subUrl = G('profileSubUrl') ? G('profileSubUrl').value.trim() : '';
+  var data = captureAdvanced();
+  data._mode='advanced';
+  data._subUrl = G('profileSubUrl').value.trim();
   var existing=profiles.findIndex(function(p){ return p.name===name; });
-  if(existing>-1) profiles[existing]={name:name,data:data,time:new Date().toLocaleString(),subUrl:data._subUrl};
-  else profiles.unshift({name:name,data:data,time:new Date().toLocaleString(),subUrl:data._subUrl});
-  lsSet('bc_profiles',profiles);
+  var entry={name:name,data:data,time:Date.now(),subUrl:data._subUrl};
+  if(existing>-1) { entry.pinned=profiles[existing].pinned; profiles[existing]=entry; }
+  else profiles.unshift(entry);
+  if(!lsSet('bc_profiles',profiles)) return;
   closeProfileModalDirect();
-  toast('Profile "'+name+'" saved','ok');
+  toast(tf('m_profile_saved', { n: name }),'ok');
   renderProfiles();
-}
-function captureSimple(){
-  return { uuid:G('s_uuid').value, port:G('s_port').value, ips:G('s_ip').value, snis:G('s_sni').value, host:G('s_host').value, path:G('s_path').value, security:G('s_security').value, fp:G('s_fp').value, alpn:G('s_alpn').value, remark:G('s_remark').value, prefix:G('s_prefix')?G('s_prefix').value:'', insecure:G('s_insecure').checked, pairMode:G('s_pairMode').checked, simType:simType, simHasEnc:simHasEnc, mode:G('s_mode')?G('s_mode').value:'auto', extra:G('s_extra')?G('s_extra').value:'', grpc:G('s_grpc')?G('s_grpc').value:'' };
+  updateRoute();
 }
 function captureAdvanced(){
-  return { uuid:G('a_uuid').value, port:G('a_port').value, ips:G('a_ips').value, snis:G('a_snis').value, host:G('a_host').value, path:G('a_path').value, security:G('a_security').value, fp:G('a_fp').value, alpn:G('a_alpn').value, prefix:G('a_prefix').value, prefixVal:G('a_prefix_val')?G('a_prefix_val').value:'', insecure:G('a_insecure').checked, pairMode:G('a_pairMode').checked, type:advType, useIps:G('a_useIps').checked, useSnis:G('a_useSnis').checked, useHost:G('a_useHost').checked, usePath:G('a_usePath').checked, useExtra:G('a_useExtra').checked, extra:G('a_extra').value, grpc:G('a_grpc').value, encryption:G('a_encryption').checked, mode:G('a_mode').value };
+  return { uuid:G('a_uuid').value, port:G('a_port').value, ips:G('a_ips').value, snis:G('a_snis').value, host:G('a_host').value, path:G('a_path').value, security:G('a_security').value, fp:G('a_fp').value, alpn:G('a_alpn').value, prefix:G('a_prefix').value, prefixVal:G('a_prefix_val').value, insecure:G('a_insecure').checked, pairMode:G('a_pairMode').checked, type:advType, extra:G('a_extra').value, grpc:G('a_grpc').value, encryption:G('a_encryption').checked, enc:advEnc, pass:advPass, flow:G('a_flow').value, pbk:G('a_pbk').value, sid:G('a_sid').value, spx:G('a_spx').value, mode:G('a_mode').value };
 }
 function renderProfiles(){
   var profiles=lsGetArr('bc_profiles');
   var el=G('profileList');
-  var searchEl=G('profileSearch');
-  var q = searchEl ? searchEl.value.trim().toLowerCase() : '';
+  var q = G('profileSearch').value.trim().toLowerCase();
   var filtered = q ? profiles.filter(function(p){ return p.name.toLowerCase().indexOf(q) > -1; }) : profiles;
-  el.textContent = '';
-  if(!profiles.length){
-    var empty = document.createElement('div');
-    empty.style.cssText = 'text-align:center;color:var(--muted);padding:32px;font-size:13px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_profiles'):'No profiles saved yet. Hit 💾 Save Profile in the Generate tab.';
-    el.appendChild(empty);
-    return;
-  }
-  if(!filtered.length){
-    var noMatch = document.createElement('div');
-    noMatch.style.cssText = 'text-align:center;color:var(--muted);padding:20px;font-size:13px;';
-    noMatch.textContent = (typeof t==='function'?t('dyn_no_profiles_match'):'No profiles match') + ' "' + q + '"';
-    el.appendChild(noMatch);
-    return;
-  }
+  if(!profiles.length){ emptyState(el, t('dyn_no_profiles')); return; }
+  if(!filtered.length){ emptyState(el, t('dyn_no_profiles_match') + ' "' + q + '"'); return; }
   var frag = document.createDocumentFragment();
   filtered.forEach(function(p) {
-    var realIdx = profiles.indexOf(p);
-    var pinned = p.pinned;
-    var hasSubUrl = !!(p.subUrl || (p.data && p.data._subUrl));
-
-    var item = document.createElement('div');
-    item.className = 'hist-item';
-    if(pinned) item.style.borderColor = 'rgba(0,245,255,0.3)';
-
-    var info = document.createElement('div');
-    info.style.cssText = 'flex:1;min-width:0;';
-
-    var nameRow = document.createElement('div');
-    nameRow.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
-    if(pinned) nameRow.appendChild(document.createTextNode('📌 '));
-    nameRow.appendChild(document.createTextNode(p.name));
-    if(hasSubUrl) {
-      var subBadge = document.createElement('span');
-      subBadge.style.cssText = 'font-size:9px;color:var(--accent);background:rgba(0,245,255,0.1);padding:1px 5px;border-radius:4px;margin-left:4px;';
-      subBadge.textContent = (typeof t==='function'?t('dyn_sub_label'):'SUB');
-      nameRow.appendChild(subBadge);
-    }
-
-    var meta = document.createElement('div');
-    meta.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px;';
-    meta.textContent = p.time + ' · ' + ((p.data&&p.data._mode)||'simple') + ' mode';
-
-    info.appendChild(nameRow);
-    info.appendChild(meta);
-    item.appendChild(info);
-
-    if(hasSubUrl) {
-      var refreshBtn = document.createElement('button');
-      refreshBtn.className = 'icn sm';
-      refreshBtn.title = 'Refresh subscription';
-      refreshBtn.textContent = '🔄';
-      (function(idx){ refreshBtn.addEventListener('click', function(){ refreshProfileSub(idx); }); })(realIdx);
-      item.appendChild(refreshBtn);
-    }
-
-    var pinBtn = document.createElement('button');
-    pinBtn.className = 'icn sm';
-    pinBtn.title = pinned ? (typeof t==='function'?t('dyn_unpin_title'):'Unpin') : (typeof t==='function'?t('dyn_pin_title'):'Pin');
-    pinBtn.textContent = pinned ? '📌' : '📎';
-    (function(idx){ pinBtn.addEventListener('click', function(){ togglePin(idx); }); })(realIdx);
-
-    var loadBtn = document.createElement('button');
-    loadBtn.className = 'icn sm';
-    loadBtn.textContent = typeof t==='function'?t('dyn_load_btn'):'Load';
-    (function(idx){ loadBtn.addEventListener('click', function(){ loadProfile(idx); }); })(realIdx);
-
-    var delBtn = document.createElement('button');
-    delBtn.className = 'icn sm';
-    delBtn.style.color = 'var(--red)';
-    delBtn.textContent = '✕';
-    (function(idx){ delBtn.addEventListener('click', function(){ deleteProfile(idx); }); })(realIdx);
-
-    item.appendChild(pinBtn);
-    item.appendChild(loadBtn);
-    item.appendChild(delBtn);
-    frag.appendChild(item);
+    var idx = profiles.indexOf(p);
+    var actions = [];
+    if(p.subUrl || (p.data && p.data._subUrl)) actions.push({ label: t('dyn_refresh_sub'), run: function(){ refreshProfileSub(idx); } });
+    actions.push({ label: p.pinned ? t('dyn_unpin_title') : t('dyn_pin_title'), run: function(){ togglePin(idx); } });
+    actions.push({ label: t('dyn_load_btn'), main: true, run: function(){ loadProfile(idx); } });
+    actions.push({ label: t('btn_delete'), run: function(){ deleteProfile(idx); } });
+    frag.appendChild(listItem({ title: p.name, meta: fmtTime(p.time), tag: p.pinned ? t('dyn_pinned') : '', tagOn: true, actions: actions }));
   });
+  el.textContent = '';
   el.appendChild(frag);
 }
 
@@ -931,77 +906,48 @@ function togglePin(i){
   if(!profiles[i]) return;
   profiles[i].pinned = !profiles[i].pinned;
   var nowPinned = profiles[i].pinned;
-  // sort pinned to top — stable sort by name within each group
-  profiles.sort(function(a,b){
-    var ap = a.pinned ? 1 : 0, bp = b.pinned ? 1 : 0;
-    return bp - ap;
-  });
+  profiles.sort(function(a,b){ return (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0); });
   lsSet('bc_profiles',profiles);
   renderProfiles();
-  toast(nowPinned ? (typeof t==='function'?t('toast_pinned'):'Pinned') : (typeof t==='function'?t('toast_unpinned'):'Unpinned'),'ok');
+  toast(nowPinned ? t('toast_pinned') : t('toast_unpinned'),'ok');
 }
+// Loads a profile into the Build form. Profiles saved by older versions used separate
+// Simple and Advanced shapes, and on/off switches for some fields.
 function loadProfile(i){
-  var profiles=lsGetArr('bc_profiles');
-  var p=profiles[i]; if(!p) return;
-  var d=p.data;
-  if(d._mode==='simple'){
-    setMode('simple');
-    G('s_uuid').value=d.uuid||''; G('s_port').value=d.port||'443';
-    G('s_ip').value=d.ips||''; G('s_sni').value=d.snis||'';
-    G('s_host').value=d.host||''; G('s_path').value=d.path||'/';
-    setOptVal(G('s_security'),d.security||'tls'); setOptVal(G('s_fp'),d.fp||''); setOptVal(G('s_alpn'),d.alpn||'');
-    G('s_remark').value=d.remark||'';
-    if(G('s_prefix')) G('s_prefix').value=d.prefix||'';
-    G('s_insecure').checked=!!d.insecure; G('s_pairMode').checked=!!d.pairMode;
-    togglePairHint('s_pairMode','s_pairHint','OFF — every IP × every SNI (full matrix)');
-    // Restore transport type and transport-specific fields
-    simType = d.simType || 'tcp';
-    simHasEnc = !!d.simHasEnc;
-    var isX = simType==='xhttp'||simType==='splithttp';
-    if(G('sw_mode'))  G('sw_mode').style.display  = isX ? '' : 'none';
-    if(G('sw_extra')) G('sw_extra').style.display = isX ? '' : 'none';
-    if(G('sw_grpc'))  G('sw_grpc').style.display  = simType==='grpc' ? '' : 'none';
-    if(isX && G('s_mode'))  setOptVal(G('s_mode'), d.mode||'auto');
-    if(isX && G('s_extra')) G('s_extra').value = d.extra||'';
-    if(simType==='grpc' && G('s_grpc')) G('s_grpc').value = d.grpc||'';
-    if(G('sTypeBadge')) G('sTypeBadge').textContent = simType.toUpperCase()+(typeof t==='function'?t('dyn_transport_badge'):' transport');
-    G('sEditor').style.display='';
-    simpleLiveCount();
-  } else {
-    setMode('advanced');
-    G('a_uuid').value=d.uuid||''; G('a_port').value=d.port||'443';
-    G('a_ips').value=d.ips||''; G('a_snis').value=d.snis||'';
-    G('a_host').value=d.host||''; G('a_path').value=d.path||'/';
-    setOptVal(G('a_security'),d.security||'tls'); setOptVal(G('a_fp'),d.fp||''); setOptVal(G('a_alpn'),d.alpn||'');
-    G('a_prefix').value=d.prefix||''; if(G('a_prefix_val')) G('a_prefix_val').value=d.prefixVal||''; G('a_insecure').checked=!!d.insecure; G('a_pairMode').checked=!!d.pairMode;
-    togglePairHint('a_pairMode','a_pairHint');
-    if(d.type) aType(d.type);
-    G('a_useIps').checked=d.useIps!==false; togPanel('a_ips',G('a_useIps'));
-    G('a_useSnis').checked=d.useSnis!==false; togPanel('a_snis',G('a_useSnis'));
-    // Restore additional advanced fields
-    G('a_useHost').checked=d.useHost!==false; togPanel('a_host',G('a_useHost'));
-    G('a_usePath').checked=d.usePath!==false; togPanel('a_path',G('a_usePath'));
-    G('a_encryption').checked=!!d.encryption;
-    if(G('a_extra')) G('a_extra').value=d.extra||'{"xPaddingBytes":"100-1000"}';
-    if(G('a_useExtra')){ G('a_useExtra').checked=d.useExtra!==false; togPanel('a_extra',G('a_useExtra')); }
-    if(G('a_grpc')) G('a_grpc').value=d.grpc||'';
-    if(d.mode && G('a_mode')) setOptVal(G('a_mode'),d.mode);
-    liveCount();
-  }
+  var p=lsGetArr('bc_profiles')[i];
+  if(!p) return;
+  var d=p.data, simple=d._mode==='simple';
+  G('a_uuid').value=d.uuid||''; G('a_uuid').classList.remove('invalid'); G('a_port').value=d.port||'443';
+  G('a_ips').value=d.useIps===false?'':(d.ips||'');
+  G('a_snis').value=d.useSnis===false?'':(d.snis||'');
+  G('a_host').value=d.useHost===false?'':(d.host||'');
+  G('a_path').value=d.usePath===false?'/':(d.path||'/');
+  setOptVal(G('a_security'),d.security||'tls'); setOptVal(G('a_fp'),d.fp||''); setOptVal(G('a_alpn'),d.alpn||'');
+  setOptVal(G('a_flow'),d.flow||'');
+  G('a_pbk').value=d.pbk||''; G('a_sid').value=d.sid||''; G('a_spx').value=d.spx||'';
+  toggleReality('a');
+  G('a_prefix').value=(simple?d.remark:d.prefix)||'';
+  G('a_prefix_val').value=(simple?d.prefix:d.prefixVal)||'';
+  G('a_insecure').checked=!!d.insecure; G('insecureNote').hidden=!d.insecure;
+  G('a_pairMode').checked=!!d.pairMode;
+  togglePairHint('a_pairMode','a_pairHint');
+  aType((simple?d.simType:d.type)||'tcp');
+  advPass=d.pass||[];
+  var enc=simple?(d.simEnc||(d.simHasEnc?'none':'')):(d.encryption?(d.enc||'none'):'');
+  G('a_encryption').checked=!!enc; advEnc=enc||'none';
+  G('a_extra').value=d.useExtra===false?'':(d.extra||'');
+  G('a_grpc').value=d.grpc||'';
+  setOptVal(G('a_mode'),d.mode||'auto');
+  liveCount();
   navTab('gen');
-  toast('Profile "'+p.name+'" loaded','ok');
+  toast(tf('m_profile_loaded', { n: p.name }),'ok');
 }
 function deleteProfile(i){
-  var profiles=lsGetArr('bc_profiles');
-  profiles.splice(i,1);
+  var profiles=lsGetArr('bc_profiles'), previous=profiles.slice(), gone=profiles.splice(i,1)[0];
   lsSet('bc_profiles',profiles);
   renderProfiles();
-  toast('Profile deleted','ok');
-}
-function clearAllProfiles(){
-  lsSet('bc_profiles',[]);
-  renderProfiles();
-  toast('All profiles cleared','ok');
+  updateRoute();
+  undoToast(t('toast_deleted').replace('{n}', gone.name), 'bc_profiles', previous, renderProfiles);
 }
 function closeProfileModal(e){ if(e.target===G('profileModal')) closeProfileModalDirect(); }
 function closeProfileModalDirect(){ G('profileModal').classList.remove('open'); G('profileName').value=''; if(G('profileSubUrl')) G('profileSubUrl').value=''; }
@@ -1010,8 +956,8 @@ async function refreshProfileSub(i) {
   var profiles = lsGetArr('bc_profiles');
   var p = profiles[i]; if(!p) return;
   var url = p.subUrl || (p.data && p.data._subUrl) || '';
-  if(!url){ toast('No subscription URL saved for this profile','err'); return; }
-  toast('Refreshing subscription...','ok');
+  if(!url){ toast(t('m_no_sub'),'err'); return; }
+  toast(t('m_refreshing'),'ok');
 
   var controller = new AbortController();
   var tid = setTimeout(function(){ controller.abort(); }, 15000);
@@ -1023,19 +969,20 @@ async function refreshProfileSub(i) {
     var links = [];
     try { var decoded = fromBase64(text); links = decoded.split('\n').map(function(x){return x.trim();}).filter(function(x){return x.startsWith('vless://');});} catch(e){}
     if(!links.length) links = text.split('\n').map(function(x){return x.trim();}).filter(function(x){return x.startsWith('vless://');});
-    if(!links.length){ toast('No vless:// links found in subscription','err'); return; }
+    if(!links.length){ toast(t('m_sub_empty'),'err'); return; }
     var existing = G('bulkInput').value.trim();
     var existingLinks = existing ? existing.split('\n').map(function(x){return x.trim();}).filter(Boolean) : [];
     var existingSet = {};
     existingLinks.forEach(function(l){ existingSet[l.replace(/#[^#]*$/, '')] = true; });
     var newLinks = links.filter(function(l){ return !existingSet[l.replace(/#[^#]*$/, '')]; });
     G('bulkInput').value = existingLinks.concat(newLinks).join('\n');
-    navTab('bulk');
+    navTab('check');
+    subTab('check','import');
     bulkSwitchTab('links');
-    toast('✓ ' + newLinks.length + ' new links added (' + (links.length - newLinks.length) + ' duplicates skipped)', 'ok');
+    toast(tf('m_sub_added', { a: newLinks.length, b: links.length - newLinks.length }), 'ok');
   } catch(e) {
-    var msg = e.name === 'AbortError' ? 'Timed out after 15s' : e.message;
-    toast('Refresh failed: ' + msg, 'err');
+    var msg = e.name === 'AbortError' ? t('m_timeout') : e.message;
+    toast(tf('m_refresh_failed', { e: msg }), 'err');
   } finally {
     clearTimeout(tid);
   }
@@ -1053,9 +1000,10 @@ function addUUID(){
   var uuids=lsGetArr('bc_uuids');
   var uuid=genUUID();
   uuids.unshift({uuid:uuid,name:'UUID '+(uuids.length+1)});
-  lsSet('bc_uuids',uuids);
+  if(!lsSet('bc_uuids',uuids)) return;
   renderUUIDs();
-  toast('UUID added','ok');
+  updateRoute();
+  toast(t('m_uuid_added'),'ok');
 }
 function showAddCustomUUID(){
   var row=G('customUUIDRow');
@@ -1071,114 +1019,67 @@ function validateCustomUUID(){
 }
 function confirmAddCustomUUID(){
   var val=G('customUUIDInput').value.trim();
-  if(!val){ toast('Enter a UUID','err'); return; }
-  if(!UUID_RE.test(val)){ toast('Invalid UUID format','err'); return; }
+  if(!val){ toast(t('m_enter_uuid'),'err'); return; }
+  if(!UUID_RE.test(val)){ toast(t('toast_invalid_uuid'),'err'); return; }
   var name=G('customUUIDName').value.trim()||'Custom UUID';
   var uuids=lsGetArr('bc_uuids');
-  if(uuids.find(function(u){ return u.uuid===val; })){ toast('UUID already saved','err'); return; }
+  if(uuids.find(function(u){ return u.uuid===val; })){ toast(t('m_uuid_dup'),'err'); return; }
   uuids.unshift({uuid:val,name:name});
-  lsSet('bc_uuids',uuids);
+  if(!lsSet('bc_uuids',uuids)) return;
   G('customUUIDInput').value='';
   G('customUUIDName').value='';
   G('customUUIDRow').style.display='none';
   renderUUIDs();
-  toast('Custom UUID added','ok');
+  updateRoute();
+  toast(t('m_uuid_added'),'ok');
 }
 function renderUUIDs(){
   var uuids=lsGetArr('bc_uuids');
   var el=G('uuidList');
-  el.textContent = '';
-  if(!uuids.length){
-    var empty = document.createElement('div');
-    empty.style.cssText = 'text-align:center;color:var(--muted);padding:32px;font-size:13px;';
-    empty.textContent = typeof t==='function'?t('dyn_no_uuids'):'No UUIDs saved. Click "+ Generate & Add".';
-    el.appendChild(empty);
-    return;
-  }
+  if(!uuids.length){ emptyState(el, t('dyn_no_uuids')); return; }
   var frag = document.createDocumentFragment();
   uuids.forEach(function(u, i) {
-    var item = document.createElement('div');
-    item.className = 'hist-item';
-
-    var info = document.createElement('div');
-    info.style.cssText = 'flex:1;min-width:0;';
-
-    var nameInput = document.createElement('input');
-    nameInput.style.cssText = 'background:transparent;border:none;color:var(--text);font-size:11px;font-family:\'JetBrains Mono\',monospace;width:100%;padding:0;';
-    nameInput.value = u.name;
-    nameInput.placeholder = 'Nickname';
-    (function(idx){ nameInput.addEventListener('change', function(){ renameUUID(idx, this.value); }); })(i);
-
-    var uuidLine = document.createElement('div');
-    uuidLine.style.cssText = 'font-size:10px;color:var(--accent);margin-top:2px;word-break:break-all;';
-    uuidLine.textContent = u.uuid;
-
-    info.appendChild(nameInput);
-    info.appendChild(uuidLine);
-
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'icn sm';
-    copyBtn.textContent = '⎘';
-    (function(uuid){ copyBtn.addEventListener('click', function(){ copyUUIDItem(uuid); }); })(u.uuid);
-
-    var delBtn = document.createElement('button');
-    delBtn.className = 'icn sm';
-    delBtn.style.color = 'var(--red)';
-    delBtn.textContent = '✕';
-    (function(idx){ delBtn.addEventListener('click', function(){ deleteUUID(idx); }); })(i);
-
-    item.appendChild(info);
-    item.appendChild(copyBtn);
-    item.appendChild(delBtn);
-    frag.appendChild(item);
+    var name = document.createElement('input');
+    name.value = u.name;
+    name.setAttribute('aria-label', t('label_nickname'));
+    name.addEventListener('change', function(){ renameUUID(i, this.value); });
+    frag.appendChild(listItem({
+      titleInput: name, meta: u.uuid, metaMono: true,
+      actions: [
+        { label: t('btn_copy'), run: function(){ copyUUIDItem(u.uuid); } },
+        { label: t('btn_delete'), run: function(){ deleteUUID(i); } }
+      ]
+    }));
   });
+  el.textContent = '';
   el.appendChild(frag);
 }
-function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function renameUUID(i,name){
   var uuids=lsGetArr('bc_uuids');
   if(uuids[i]) uuids[i].name=name;
   lsSet('bc_uuids',uuids);
 }
 function deleteUUID(i){
-  var uuids=lsGetArr('bc_uuids');
-  uuids.splice(i,1);
+  var uuids=lsGetArr('bc_uuids'), previous=uuids.slice(), gone=uuids.splice(i,1)[0];
   lsSet('bc_uuids',uuids);
   renderUUIDs();
-  toast('UUID deleted','ok');
+  updateRoute();
+  undoToast(t('toast_deleted').replace('{n}', gone.name), 'bc_uuids', previous, renderUUIDs);
 }
 function copyUUIDItem(uuid){
-  safeClipboard(uuid).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Failed','err'); });
+  safeClipboard(uuid).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); });
 }
 function pickUUID(targetId){
   _uuidTarget=targetId;
   var uuids=lsGetArr('bc_uuids');
   var el=G('uuidPickList');
-  if(!uuids.length) {
-    var empty = document.createElement('div');
-    empty.style.cssText = 'color:var(--muted);text-align:center;padding:20px;font-size:12px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_saved_uuids'):'No saved UUIDs. Add some in the 🗄 Saved Data tab.';
-    el.appendChild(empty);
-  } else {
+  if(!uuids.length) emptyState(el, t('dyn_no_saved_uuids'));
+  else {
     var frag = document.createDocumentFragment();
     uuids.forEach(function(u) {
-      var item = document.createElement('div');
-      item.className = 'hist-item';
-      item.style.cursor = 'pointer';
-      (function(uuid){ item.addEventListener('click', function(){ selectUUID(uuid); }); })(u.uuid);
-
-      var inner = document.createElement('div');
-      var nameLine = document.createElement('div');
-      nameLine.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
-      nameLine.textContent = u.name;
-      var uuidLine = document.createElement('div');
-      uuidLine.style.cssText = 'font-size:10px;color:var(--accent);margin-top:2px;';
-      uuidLine.textContent = u.uuid;
-      inner.appendChild(nameLine);
-      inner.appendChild(uuidLine);
-      item.appendChild(inner);
-      frag.appendChild(item);
+      frag.appendChild(listItem({ title: u.name, meta: u.uuid, metaMono: true, pick: function(){ selectUUID(u.uuid); } }));
     });
+    el.textContent = '';
     el.appendChild(frag);
   }
   G('uuidModal').classList.add('open');
@@ -1186,28 +1087,10 @@ function pickUUID(targetId){
 function selectUUID(uuid){
   if(_uuidTarget){ G(_uuidTarget).value=uuid; G(_uuidTarget).classList.remove('invalid'); }
   closeUUIDModalDirect();
-  toast('UUID applied','ok');
+  toast(t('m_uuid_applied'),'ok');
 }
 function closeUUIDModal(e){ if(e.target===G('uuidModal')) closeUUIDModalDirect(); }
 function closeUUIDModalDirect(){ G('uuidModal').classList.remove('open'); _uuidTarget=null; }
-
-// ══════════════════════════════════════════════════════════
-// SAVED DATA TAB — sub-tab switcher
-// ══════════════════════════════════════════════════════════
-function savedDataTab(name) {
-  ['uuids','ips','snis'].forEach(function(n) {
-    var panel = G('sdp-'+n);
-    if(panel) panel.classList.toggle('active', n===name);
-  });
-  var tabs = document.querySelectorAll('#savedDataTabs .tab2');
-  tabs.forEach(function(t) {
-    var m = (t.getAttribute('onclick')||'').match(/savedDataTab\('(\w+)'\)/);
-    t.classList.toggle('active', !!(m && m[1]===name));
-  });
-  if(name==='ips')   renderIPLists();
-  if(name==='snis')  renderSNILists();
-  if(name==='uuids') renderUUIDs();
-}
 
 // ══════════════════════════════════════════════════════════
 // IP LIST MANAGER
@@ -1223,98 +1106,60 @@ function showAddIPList() {
 function confirmAddIPList() {
   var name = G('ipListName').value.trim();
   var ips  = G('ipListInput').value.trim();
-  if(!name) { toast('Enter a label for this IP list','err'); return; }
-  if(!ips)  { toast('Enter at least one IP / host','err'); return; }
+  if(!name) { toast(t('m_label_ip'),'err'); return; }
+  if(!ips)  { toast(t('toast_add_ip'),'err'); return; }
   var lists = lsGetArr('bc_iplists');
   var existing = lists.findIndex(function(l){ return l.name===name; });
   var entry = { name:name, ips:ips, time:new Date().toLocaleString() };
   if(existing > -1) lists[existing] = entry;
   else lists.unshift(entry);
-  lsSet('bc_iplists', lists);
+  if(!lsSet('bc_iplists', lists)) return;
   G('ipListName').value=''; G('ipListInput').value='';
   G('addIPListRow').style.display='none';
   renderIPLists();
-  toast('IP list "'+name+'" saved','ok');
+  updateRoute();
+  toast(tf('m_list_saved', { n: name }),'ok');
 }
 
+function _lineCount(text) {
+  return text.split('\n').filter(function(x){ return x.trim(); }).length;
+}
 function renderIPLists() {
   var lists = lsGetArr('bc_iplists');
   var el = G('ipSavedList');
-  if(!el) return;
-  el.textContent = '';
-  if(!lists.length) {
-    var empty = document.createElement('div');
-    empty.style.cssText = 'text-align:center;color:var(--muted);padding:32px;font-size:13px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_ip_lists'):'No IP lists saved. Use ★ Save IPs next to any IP field, or click ✎ Add New above.';
-    el.appendChild(empty);
-    return;
-  }
+  if(!lists.length) { emptyState(el, t('dyn_no_ip_lists')); return; }
   var frag = document.createDocumentFragment();
   lists.forEach(function(l, i) {
-    var preview = l.ips.split('\n').slice(0,3).join(', ') + (l.ips.split('\n').length > 3 ? '…' : '');
-    var count   = l.ips.split('\n').filter(function(x){ return x.trim(); }).length;
-
-    var item = document.createElement('div');
-    item.className = 'hist-item';
-
-    var info = document.createElement('div');
-    info.style.cssText = 'flex:1;min-width:0;';
-
-    var nameLine = document.createElement('div');
-    nameLine.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
-    nameLine.textContent = l.name;
-
-    var metaLine = document.createElement('div');
-    metaLine.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px;';
-    metaLine.textContent = l.time + ' · ' + count + ' entr' + (count!==1?'ies':'y');
-
-    var previewLine = document.createElement('div');
-    previewLine.style.cssText = 'font-size:10px;color:var(--accent);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    previewLine.textContent = preview;
-
-    info.appendChild(nameLine);
-    info.appendChild(metaLine);
-    info.appendChild(previewLine);
-
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'icn sm';
-    copyBtn.title = 'Copy IPs';
-    copyBtn.textContent = '⎘';
-    (function(idx){ copyBtn.addEventListener('click', function(){ copyIPListItem(idx); }); })(i);
-
-    var delBtn = document.createElement('button');
-    delBtn.className = 'icn sm';
-    delBtn.title = 'Delete';
-    delBtn.style.color = 'var(--red)';
-    delBtn.textContent = '✕';
-    (function(idx){ delBtn.addEventListener('click', function(){ deleteIPList(idx); }); })(i);
-
-    item.appendChild(info);
-    item.appendChild(copyBtn);
-    item.appendChild(delBtn);
-    frag.appendChild(item);
+    frag.appendChild(listItem({
+      title: l.name, meta: _lineCount(l.ips) + ' ' + t('dyn_entries'),
+      actions: [
+        { label: t('btn_copy'), run: function(){ copyIPListItem(i); } },
+        { label: t('btn_delete'), run: function(){ deleteIPList(i); } }
+      ]
+    }));
   });
+  el.textContent = '';
   el.appendChild(frag);
 }
 
 function deleteIPList(i) {
-  var lists = lsGetArr('bc_iplists');
-  lists.splice(i,1);
+  var lists = lsGetArr('bc_iplists'), previous = lists.slice(), gone = lists.splice(i,1)[0];
   lsSet('bc_iplists',lists);
   renderIPLists();
-  toast('IP list deleted','ok');
+  updateRoute();
+  undoToast(t('toast_deleted').replace('{n}', gone.name), 'bc_iplists', previous, renderIPLists);
 }
 
 function copyIPListItem(i) {
   var lists = lsGetArr('bc_iplists');
   if(!lists[i]) return;
-  safeClipboard(lists[i].ips).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Failed','err'); });
+  safeClipboard(lists[i].ips).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); });
 }
 
 // Save IPs from a textarea field into the saved lists
 function saveIPList(fieldId) {
   var val = G(fieldId) ? G(fieldId).value.trim() : '';
-  if(!val) { toast('IP field is empty — nothing to save','err'); return; }
+  if(!val) { toast(t('m_ip_empty'),'err'); return; }
   // Use inline modal instead of prompt() — prompt() is blocked in Android WebViews
   _pendingSaveField = fieldId;
   _pendingSaveType  = 'ip';
@@ -1328,33 +1173,13 @@ function pickIPList(targetId) {
   _ipTarget = targetId;
   var lists = lsGetArr('bc_iplists');
   var el = G('ipPickList');
-  el.textContent = '';
-  if(!lists.length) {
-    var empty = document.createElement('div');
-    empty.style.cssText = 'color:var(--muted);text-align:center;padding:20px;font-size:12px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_saved_ips'):'No saved IP lists. Use ★ Save IPs to save one, or go to the 🗄 Saved Data tab.';
-    el.appendChild(empty);
-  } else {
+  if(!lists.length) emptyState(el, t('dyn_no_saved_ips'));
+  else {
     var frag = document.createDocumentFragment();
     lists.forEach(function(l, i) {
-      var count = l.ips.split('\n').filter(function(x){ return x.trim(); }).length;
-      var item = document.createElement('div');
-      item.className = 'hist-item';
-      item.style.cursor = 'pointer';
-      (function(idx){ item.addEventListener('click', function(){ selectIPList(idx); }); })(i);
-
-      var inner = document.createElement('div');
-      var nameLine = document.createElement('div');
-      nameLine.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
-      nameLine.textContent = l.name;
-      var metaLine = document.createElement('div');
-      metaLine.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px;';
-      metaLine.textContent = count + ' entr' + (count!==1?'ies':'y') + ' · ' + l.time;
-      inner.appendChild(nameLine);
-      inner.appendChild(metaLine);
-      item.appendChild(inner);
-      frag.appendChild(item);
+      frag.appendChild(listItem({ title: l.name, meta: _lineCount(l.ips) + ' ' + t('dyn_entries'), pick: function(){ selectIPList(i); } }));
     });
+    el.textContent = '';
     el.appendChild(frag);
   }
   G('ipModal').classList.add('open');
@@ -1365,12 +1190,10 @@ function selectIPList(i) {
   if(!lists[i]) return;
   if(_ipTarget && G(_ipTarget)) {
     G(_ipTarget).value = lists[i].ips;
-    // Trigger live count update for whichever field was targeted
-    if(_ipTarget === 's_ip') simpleLiveCount();
-    else if(_ipTarget === 'a_ips') liveCount();
+    liveCount();
   }
   closeIPModalDirect();
-  toast('IP list "'+lists[i].name+'" loaded','ok');
+  toast(tf('m_list_loaded', { n: lists[i].name }),'ok');
 }
 
 function closeIPModal(e) { if(e.target===G('ipModal')) closeIPModalDirect(); }
@@ -1390,98 +1213,57 @@ function showAddSNIList() {
 function confirmAddSNIList() {
   var name = G('sniListName').value.trim();
   var snis = G('sniListInput').value.trim();
-  if(!name) { toast('Enter a label for this SNI list','err'); return; }
-  if(!snis) { toast('Enter at least one SNI','err'); return; }
+  if(!name) { toast(t('m_label_sni'),'err'); return; }
+  if(!snis) { toast(t('m_enter_sni'),'err'); return; }
   var lists = lsGetArr('bc_snilists');
   var existing = lists.findIndex(function(l){ return l.name===name; });
   var entry = { name:name, snis:snis, time:new Date().toLocaleString() };
   if(existing > -1) lists[existing] = entry;
   else lists.unshift(entry);
-  lsSet('bc_snilists', lists);
+  if(!lsSet('bc_snilists', lists)) return;
   G('sniListName').value=''; G('sniListInput').value='';
   G('addSNIListRow').style.display='none';
   renderSNILists();
-  toast('SNI list "'+name+'" saved','ok');
+  updateRoute();
+  toast(tf('m_list_saved', { n: name }),'ok');
 }
 
 function renderSNILists() {
   var lists = lsGetArr('bc_snilists');
   var el = G('sniSavedList');
-  if(!el) return;
-  el.textContent = '';
-  if(!lists.length) {
-    var empty = document.createElement('div');
-    empty.style.cssText = 'text-align:center;color:var(--muted);padding:32px;font-size:13px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_sni_lists'):'No SNI lists saved. Use ★ Save SNIs next to any SNI field, or click ✎ Add New above.';
-    el.appendChild(empty);
-    return;
-  }
+  if(!lists.length) { emptyState(el, t('dyn_no_sni_lists')); return; }
   var frag = document.createDocumentFragment();
   lists.forEach(function(l, i) {
-    var preview = l.snis.split('\n').slice(0,3).join(', ') + (l.snis.split('\n').length > 3 ? '…' : '');
-    var count   = l.snis.split('\n').filter(function(x){ return x.trim(); }).length;
-
-    var item = document.createElement('div');
-    item.className = 'hist-item';
-
-    var info = document.createElement('div');
-    info.style.cssText = 'flex:1;min-width:0;';
-
-    var nameLine = document.createElement('div');
-    nameLine.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
-    nameLine.textContent = l.name;
-
-    var metaLine = document.createElement('div');
-    metaLine.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px;';
-    metaLine.textContent = l.time + ' · ' + count + ' SNI' + (count!==1?'s':'');
-
-    var previewLine = document.createElement('div');
-    previewLine.style.cssText = 'font-size:10px;color:var(--accent);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    previewLine.textContent = preview;
-
-    info.appendChild(nameLine);
-    info.appendChild(metaLine);
-    info.appendChild(previewLine);
-
-    var copyBtn = document.createElement('button');
-    copyBtn.className = 'icn sm';
-    copyBtn.title = 'Copy SNIs';
-    copyBtn.textContent = '⎘';
-    (function(idx){ copyBtn.addEventListener('click', function(){ copySNIListItem(idx); }); })(i);
-
-    var delBtn = document.createElement('button');
-    delBtn.className = 'icn sm';
-    delBtn.title = 'Delete';
-    delBtn.style.color = 'var(--red)';
-    delBtn.textContent = '✕';
-    (function(idx){ delBtn.addEventListener('click', function(){ deleteSNIList(idx); }); })(i);
-
-    item.appendChild(info);
-    item.appendChild(copyBtn);
-    item.appendChild(delBtn);
-    frag.appendChild(item);
+    frag.appendChild(listItem({
+      title: l.name, meta: _lineCount(l.snis) + ' SNI',
+      actions: [
+        { label: t('btn_copy'), run: function(){ copySNIListItem(i); } },
+        { label: t('btn_delete'), run: function(){ deleteSNIList(i); } }
+      ]
+    }));
   });
+  el.textContent = '';
   el.appendChild(frag);
 }
 
 function deleteSNIList(i) {
-  var lists = lsGetArr('bc_snilists');
-  lists.splice(i,1);
+  var lists = lsGetArr('bc_snilists'), previous = lists.slice(), gone = lists.splice(i,1)[0];
   lsSet('bc_snilists',lists);
   renderSNILists();
-  toast('SNI list deleted','ok');
+  updateRoute();
+  undoToast(t('toast_deleted').replace('{n}', gone.name), 'bc_snilists', previous, renderSNILists);
 }
 
 function copySNIListItem(i) {
   var lists = lsGetArr('bc_snilists');
   if(!lists[i]) return;
-  safeClipboard(lists[i].snis).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Failed','err'); });
+  safeClipboard(lists[i].snis).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); });
 }
 
 // Save SNIs from a textarea field into the saved lists
 function saveSNIList(fieldId) {
   var val = G(fieldId) ? G(fieldId).value.trim() : '';
-  if(!val) { toast('SNI field is empty — nothing to save','err'); return; }
+  if(!val) { toast(t('m_sni_empty'),'err'); return; }
   // Use inline modal instead of prompt() — prompt() is blocked in Android WebViews
   _pendingSaveField = fieldId;
   _pendingSaveType  = 'sni';
@@ -1495,33 +1277,13 @@ function pickSNIList(targetId) {
   _sniTarget = targetId;
   var lists = lsGetArr('bc_snilists');
   var el = G('sniPickList');
-  el.textContent = '';
-  if(!lists.length) {
-    var empty = document.createElement('div');
-    empty.style.cssText = 'color:var(--muted);text-align:center;padding:20px;font-size:12px;';
-    empty.innerHTML = typeof t==='function'?t('dyn_no_saved_snis'):'No saved SNI lists. Use ★ Save SNIs to save one, or go to the 🗄 Saved Data tab.';
-    el.appendChild(empty);
-  } else {
+  if(!lists.length) emptyState(el, t('dyn_no_saved_snis'));
+  else {
     var frag = document.createDocumentFragment();
     lists.forEach(function(l, i) {
-      var count = l.snis.split('\n').filter(function(x){ return x.trim(); }).length;
-      var item = document.createElement('div');
-      item.className = 'hist-item';
-      item.style.cursor = 'pointer';
-      (function(idx){ item.addEventListener('click', function(){ selectSNIList(idx); }); })(i);
-
-      var inner = document.createElement('div');
-      var nameLine = document.createElement('div');
-      nameLine.style.cssText = 'font-size:12px;font-weight:700;color:var(--text);';
-      nameLine.textContent = l.name;
-      var metaLine = document.createElement('div');
-      metaLine.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px;';
-      metaLine.textContent = count + ' SNI' + (count!==1?'s':'') + ' · ' + l.time;
-      inner.appendChild(nameLine);
-      inner.appendChild(metaLine);
-      item.appendChild(inner);
-      frag.appendChild(item);
+      frag.appendChild(listItem({ title: l.name, meta: _lineCount(l.snis) + ' SNI', pick: function(){ selectSNIList(i); } }));
     });
+    el.textContent = '';
     el.appendChild(frag);
   }
   G('sniModal').classList.add('open');
@@ -1532,12 +1294,10 @@ function selectSNIList(i) {
   if(!lists[i]) return;
   if(_sniTarget && G(_sniTarget)) {
     G(_sniTarget).value = lists[i].snis;
-    // Trigger live count update for whichever field was targeted
-    if(_sniTarget === 's_sni') simpleLiveCount();
-    else if(_sniTarget === 'a_snis') liveCount();
+    liveCount();
   }
   closeSNIModalDirect();
-  toast('SNI list "'+lists[i].name+'" loaded','ok');
+  toast(tf('m_list_loaded', { n: lists[i].name }),'ok');
 }
 
 function closeSNIModal(e) { if(e.target===G('sniModal')) closeSNIModalDirect(); }
@@ -1557,16 +1317,16 @@ function bulkImport(){
   // If on b64 tab, auto-decode first; bail if nothing usable comes back
   if(activeTab === 'b64') {
     var raw = G('subInput').value.trim();
-    if(!raw){ toast('Paste a base64 string first','err'); return; }
+    if(!raw){ toast(t('m_paste_b64'),'err'); return; }
     var prevLen = G('bulkInput').value.trim().length;
     decodeSub(); // synchronous — writes to bulkInput and toasts on error
     if(G('bulkInput').value.trim().length === prevLen){ return; } // decode added nothing
   }
 
   var _bulkRaw = G('bulkInput').value;
-  if(_bulkRaw.length > 5_000_000) { toast('Input too large — max 5 MB', 'err'); return; }
+  if(_bulkRaw.length > 5_000_000) { toast(t('m_too_large_5'), 'err'); return; }
   var lines=_bulkRaw.split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return x.startsWith('vless://'); });
-  if(!lines.length){ toast('No valid vless:// links found — decode or paste links first','err'); return; }
+  if(!lines.length){ toast(t('m_no_links'),'err'); return; }
   var strict = G('strictDedup') && G('strictDedup').checked;
   var seen={}, unique=[], dupes=0;
   lines.forEach(function(l){
@@ -1590,12 +1350,12 @@ function bulkImport(){
   G('bulkStats').style.display='';
   G('bulkOut').textContent=unique.join('\n');
   G('bulkResultCard').style.display='';
-  toast(unique.length+(typeof t==='function'?t('toast_unique_removed'):' unique links, ')+dupes+(typeof t==='function'?t('toast_removed_suffix'):' removed'),'ok');
+  toast(unique.length+t('toast_unique_removed')+dupes+t('toast_removed_suffix'),'ok');
 }
 function bulkClear(){ G('bulkInput').value=''; G('bulkOut').textContent=''; G('bulkStats').style.display='none'; G('bulkResultCard').style.display='none'; }
-function bulkCopy(){ safeClipboard(G('bulkOut').textContent).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Copy failed','err'); }); }
-function bulkDl(){ dlText('vless_dedup.txt',G('bulkOut').textContent); toast('Downloaded','ok'); }
-function bulkDlB64(){ dlText('vless_dedup_b64.txt', toBase64(G('bulkOut').textContent)); toast('Base64 downloaded','ok'); }
+function bulkCopy(){ safeClipboard(G('bulkOut').textContent).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); }); }
+function bulkDl(){ dlText('vless_dedup.txt',G('bulkOut').textContent); toast(t('toast_downloaded'),'ok'); }
+function bulkDlB64(){ dlText('vless_dedup_b64.txt', toBase64(G('bulkOut').textContent)); toast(t('toast_downloaded'),'ok'); }
 
 // ══════════════════════════════════════════════════════════
 // TOOLS
@@ -1623,8 +1383,8 @@ async function _doValidate(doPing) {
     el.appendChild(d);
   }
 
-  if(!raw){ _validatorNotice('Paste a vless:// link first.'); return; }
-  if(!raw.startsWith('vless://')){ _validatorNotice('✕ Must start with vless://'); return; }
+  if(!raw){ _validatorNotice(t('m_no_links')); return; }
+  if(!raw.startsWith('vless://')){ _validatorNotice(t('toast_must_start_vless')); return; }
 
   var checks = [];
   var parsed = null;
@@ -1633,142 +1393,111 @@ async function _doValidate(doPing) {
     checks.push({ label: label, pass: pass, detail: detail || '', critical: !!critical });
   }
 
-  try {
-    var u = new URL(raw.replace(/^vless:\/\//, 'https://'));
-    var p = new URLSearchParams(u.search);
-    parsed = {
-      uuid: u.username, host: u.hostname, port: u.port || '443',
-      security: p.get('security') || 'tls', sni: p.get('sni') || '',
-      fp: p.get('fp') || '', alpn: p.get('alpn') || '',
-      type: p.get('type') || 'tcp', path: p.get('path') || '/',
-      remark: decodeURIComponent(u.hash.slice(1) || ''),
-      insecure: (p.get('allowInsecure') || p.get('insecure')) === '1'
-    };
-  } catch(e) {
-    _validatorNotice('✕ Failed to parse URI — malformed link');
+  var c = parseVless(raw);
+  if(!c) {
+    _validatorNotice(t('toast_parse_failed'));
     return;
   }
+  parsed = {
+    uuid: c.uuid, host: c.address, port: c.port,
+    security: c.security, sni: c.sni, fp: c.fp, alpn: c.alpn,
+    type: c.type, path: c.path, remark: c.remark, insecure: c.insecure,
+    pbk: c.pbk
+  };
 
   // UUID
-  check('UUID format', UUID_RE.test(parsed.uuid), parsed.uuid || '(empty)', true);
+  check(t('v_uuid'), UUID_RE.test(parsed.uuid), parsed.uuid || t('v_empty'), true);
   // Host
-  check('Host / IP present', !!parsed.host, parsed.host || '(empty)', true);
+  check(t('v_host'), !!parsed.host, parsed.host || t('v_empty'), true);
   // Port
   var portNum = parseInt(parsed.port, 10);
-  check('Port valid (1–65535)', portNum >= 1 && portNum <= 65535, 'port: ' + parsed.port, true);
+  check(t('v_port'), portNum >= 1 && portNum <= 65535, parsed.port, true);
   // Security
   var knownSecurity = ['tls', 'reality', 'none'];
-  check('Security field known', knownSecurity.indexOf(parsed.security) > -1, parsed.security);
+  check(t('v_security'), knownSecurity.indexOf(parsed.security) > -1, parsed.security);
   // SNI for TLS
   if(parsed.security === 'tls' || parsed.security === 'reality') {
-    check('SNI present (TLS/Reality)', !!parsed.sni, parsed.sni || '⚠ Missing — may cause TLS failure');
+    check(t('v_sni'), !!parsed.sni, parsed.sni || t('v_sni_missing'));
+  }
+  if(parsed.security === 'reality') {
+    check(t('v_pbk'), !!parsed.pbk, parsed.pbk || t('v_pbk_missing'), true);
+  }
+  if(parsed.security === 'none' && (!c.encryption || c.encryption === 'none') && !_isBlockedHost(parsed.host)) {
+    check(t('v_plain'), false, t('v_plain_detail'));
   }
   // Fingerprint
-  var knownFps = ['chrome','firefox','safari','edge','ios','android','random',''];
-  check('Fingerprint known', knownFps.indexOf(parsed.fp) > -1, parsed.fp || '(none)');
+  var knownFps = ['chrome','firefox','safari','edge','ios','android','360','qq','random','randomized',''];
+  check(t('v_fp'), knownFps.indexOf(parsed.fp) > -1, parsed.fp || t('v_none'));
   // Insecure warning
   if(parsed.insecure) {
-    check('Allow-insecure OFF', false, '⚠ allowInsecure=1 — TLS cert not verified');
+    check(t('v_insecure'), false, t('v_insecure_on'));
   } else {
-    check('Allow-insecure OFF', true, 'Certificate verification enabled');
+    check(t('v_insecure'), true, t('v_cert_ok'));
   }
   // Transport
   var knownTypes = ['tcp','ws','xhttp','splithttp','httpupgrade','grpc','h2','http'];
-  check('Transport type known', knownTypes.indexOf(parsed.type) > -1, parsed.type);
+  check(t('v_transport'), knownTypes.indexOf(parsed.type) > -1, parsed.type);
   // Path for non-TCP transports
   if(['ws','xhttp','splithttp','httpupgrade'].indexOf(parsed.type) > -1) {
-    check('Path set', !!parsed.path && parsed.path !== '', parsed.path || '(empty)');
+    check(t('v_path'), !!parsed.path && parsed.path !== '', parsed.path || t('v_empty'));
   }
   // Remark
-  check('Has remark', !!parsed.remark, parsed.remark || '(none — links will be unnamed)');
+  check(t('v_remark'), !!parsed.remark, parsed.remark || t('v_no_remark'));
 
   // Render checks via DOM — no innerHTML
   var passed = checks.filter(function(c){ return c.pass; }).length;
-  var failed = checks.filter(function(c){ return !c.pass; }).length;
+  var failed = checks.length - passed;
   var critical = checks.filter(function(c){ return !c.pass && c.critical; }).length;
   var score = Math.round((passed / checks.length) * 100);
-  var scoreColor = score >= 90 ? 'var(--green)' : score >= 60 ? '#f59e0b' : 'var(--red)';
 
-  // Build score header
   var frag = document.createDocumentFragment();
 
   var scoreHeader = document.createElement('div');
-  scoreHeader.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:12px;padding:10px 14px;background:rgba(0,0,0,0.2);border-radius:8px;';
-
-  var scoreNum = document.createElement('div');
-  scoreNum.style.cssText = 'font-size:28px;font-weight:800;font-family:\'JetBrains Mono\',monospace;';
-  scoreNum.style.color = scoreColor;
+  scoreHeader.className = 'score';
+  var scoreNum = document.createElement('b');
+  scoreNum.className = score >= 90 ? 'ok' : score >= 60 ? 'warn' : 'bad';
   scoreNum.textContent = String(score);
-
   var scoreInfo = document.createElement('div');
   var scoreTitle = document.createElement('div');
-  scoreTitle.style.cssText = 'font-size:11px;font-weight:700;color:var(--text);';
-  scoreTitle.textContent = critical > 0
-    ? (typeof t==='function'?t('dyn_critical_issues'):'✕ Critical issues found')
-    : failed > 0
-      ? (typeof t==='function'?t('dyn_minor_issues'):'⚠ Minor issues')
-      : (typeof t==='function'?t('dyn_config_looks_good'):'✓ Config looks good');
-  var scoreMeta = document.createElement('div');
-  scoreMeta.style.cssText = 'font-size:10px;color:var(--muted);margin-top:2px;';
-  scoreMeta.textContent = passed + (typeof t==='function'?t('dyn_passed'):' passed · ') + failed + (typeof t==='function'?t('dyn_failed'):' failed');
+  scoreTitle.textContent = critical > 0 ? t('dyn_critical_issues') : failed > 0 ? t('dyn_minor_issues') : t('dyn_config_looks_good');
+  var scoreMeta = document.createElement('small');
+  scoreMeta.textContent = passed + t('dyn_passed') + failed + t('dyn_failed');
   scoreInfo.appendChild(scoreTitle);
   scoreInfo.appendChild(scoreMeta);
   scoreHeader.appendChild(scoreNum);
   scoreHeader.appendChild(scoreInfo);
   frag.appendChild(scoreHeader);
 
-  // Build check rows
   checks.forEach(function(c) {
-    var icon = c.pass ? '✓' : (c.critical ? '✕' : '⚠');
-    var color = c.pass ? 'var(--green)' : (c.critical ? 'var(--red)' : '#f59e0b');
-
+    var state = c.pass ? 'ok' : (c.critical ? 'bad' : 'warn');
     var row = document.createElement('div');
-    row.className = 'parse-row';
-    if(!c.pass) row.style.cssText = 'background:rgba(244,63,94,0.05);border-radius:6px;padding:5px 8px;';
-
-    var iconSpan = document.createElement('span');
-    iconSpan.style.cssText = 'font-weight:700;min-width:16px;';
-    iconSpan.style.color = color;
-    iconSpan.textContent = icon;
-
+    row.className = 'check-row';
     var labelSpan = document.createElement('span');
-    labelSpan.className = 'parse-key';
-    if(!c.pass) labelSpan.style.color = color;
+    if(!c.pass) labelSpan.className = state;
     labelSpan.textContent = c.label;
-
     var detailSpan = document.createElement('span');
-    detailSpan.className = 'parse-val';
-    detailSpan.style.cssText = 'font-size:10px;color:var(--muted);';
+    detailSpan.className = 'row-val';
     detailSpan.textContent = c.detail;
-
-    row.appendChild(iconSpan);
+    row.appendChild(statusIcon(state));
     row.appendChild(labelSpan);
     row.appendChild(detailSpan);
     frag.appendChild(row);
   });
 
   // TCPing placeholder row
-  var pingRow = null, pingVal = null;
   if(doPing) {
-    pingRow = document.createElement('div');
+    var pingRow = document.createElement('div');
     pingRow.id = 'validatorPingRow';
-    pingRow.className = 'parse-row';
-    pingRow.style.cssText = 'margin-top:6px;background:rgba(0,0,0,0.15);border-radius:6px;padding:5px 8px;';
-
+    pingRow.className = 'check-row';
     var pingIcon = document.createElement('span');
-    pingIcon.style.color = 'var(--muted)';
-    pingIcon.textContent = '⏳';
-
+    pingIcon.className = 'muted';
+    pingIcon.textContent = '…';
     var pingLabel = document.createElement('span');
-    pingLabel.className = 'parse-key';
-    pingLabel.textContent = 'TCPing ' + parsed.host + ':' + parsed.port;
-
-    pingVal = document.createElement('span');
+    pingLabel.textContent = formatHost(parsed.host) + ':' + parsed.port;
+    var pingVal = document.createElement('span');
     pingVal.id = 'validatorPingVal';
-    pingVal.className = 'parse-val';
-    pingVal.style.cssText = 'font-size:10px;color:var(--muted);';
-    pingVal.textContent = 'testing...';
-
+    pingVal.className = 'row-val';
+    pingVal.textContent = t('dyn_testing');
     pingRow.appendChild(pingIcon);
     pingRow.appendChild(pingLabel);
     pingRow.appendChild(pingVal);
@@ -1788,11 +1517,17 @@ async function _doValidate(doPing) {
     if(pv && pr) {
       if(res.ok) {
         pv.textContent = res.ms + ' ms avg (' + res.times.join('/') + ' ms)';
-        pv.style.color = res.ms < 150 ? 'var(--green)' : '#f59e0b';
+        pv.style.color = res.ms < 150 ? 'var(--green)' : 'var(--amber)';
         pr.querySelector('span').textContent = '✓';
         pr.querySelector('span').style.color = 'var(--green)';
+      } else if(res.inconclusive) {
+        pv.textContent = pingFailLabel(res);
+        pv.title = t('dyn_unconfirmed_hint');
+        pv.style.color = 'var(--amber)';
+        pr.querySelector('span').textContent = '?';
+        pr.querySelector('span').style.color = 'var(--amber)';
       } else {
-        pv.textContent = 'Unreachable / timeout';
+        pv.textContent = pingFailLabel(res);
         pv.style.color = 'var(--red)';
         pr.querySelector('span').textContent = '✕';
         pr.querySelector('span').style.color = 'var(--red)';
@@ -1803,56 +1538,36 @@ async function _doValidate(doPing) {
 
 // Config Diff
 function parseLink(raw){
-  if(!raw||!raw.startsWith('vless://')) return null;
-  try{
-    var u=new URL(raw.replace(/^vless:\/\//,'https://'));
-    var p=new URLSearchParams(u.search);
-    return { uuid:u.username, address:u.hostname, port:u.port||'443', security:p.get('security')||'tls', sni:p.get('sni')||'', fp:p.get('fp')||'', alpn:p.get('alpn')||'', type:p.get('type')||'tcp', host:p.get('host')||'', path:p.get('path')||'/', mode:p.get('mode')||'', insecure:p.get('allowInsecure')||p.get('insecure')||'0', encryption:p.get('encryption')||'', remark:decodeURIComponent(u.hash.slice(1)||'') };
-  }catch(e){ return null; }
+  var c=parseVless(raw);
+  if(!c) return null;
+  return { uuid:c.uuid, address:c.address, port:c.port, security:c.security, sni:c.sni, fp:c.fp, alpn:c.alpn, pbk:c.pbk, sid:c.sid, spx:c.spx, flow:c.flow, type:c.type, host:c.host, path:c.path, mode:c.mode, extra:c.extra, serviceName:c.serviceName, insecure:c.insecure?'1':'0', encryption:c.encryption, other:c.pass.map(function(kv){ return kv.join('='); }).sort().join('&'), remark:c.remark };
 }
 function runDiff(){
   var a=parseLink(G('diffA').value.trim()), b=parseLink(G('diffB').value.trim());
-  if(!a||!b){ toast('Both links must be valid vless:// URIs','err'); return; }
+  if(!a||!b){ toast(t('m_both_links'),'err'); return; }
   var keys=Object.keys(a);
   var diffCount=keys.filter(function(k){ return (a[k]||'—')!==(b[k]||'—'); }).length;
   var diffFrag = document.createDocumentFragment();
 
   var notice = document.createElement('div');
-  notice.className = 'notice';
-  notice.style.marginBottom = '10px';
-  if(diffCount) {
-    notice.textContent = '⚠ ' + diffCount + (typeof t==='function'?(diffCount!==1?t('dyn_fields_differ_plural'):t('dyn_fields_differ')):(diffCount!==1?' fields':' field')) + (typeof t==='function'?t('dyn_differ_suffix'):' differ');
-  } else {
-    notice.style.cssText = 'margin-bottom:10px;background:rgba(34,197,94,0.06);border-color:rgba(34,197,94,0.2);color:rgba(34,197,94,0.8);';
-    notice.textContent = typeof t==='function'?t('dyn_links_identical'):'✓ Links are identical';
-  }
+  notice.className = 'notice ' + (diffCount ? 'bad-note' : 'good');
+  notice.textContent = diffCount
+    ? diffCount + (diffCount!==1?t('dyn_fields_differ_plural'):t('dyn_fields_differ')) + t('dyn_differ_suffix')
+    : t('dyn_links_identical');
   diffFrag.appendChild(notice);
 
   keys.forEach(function(k) {
     var va = a[k]||'—', vb = b[k]||'—';
-    var diff = va !== vb;
-
+    if(!(a[k]||b[k])) return;
     var row = document.createElement('div');
-    row.className = 'parse-row';
-    if(diff) row.style.cssText = 'background:rgba(244,63,94,0.06);border-radius:6px;padding:5px 8px;';
-
+    row.className = 'diff-row' + (va !== vb ? ' changed' : '');
     var keySpan = document.createElement('span');
-    keySpan.className = 'parse-key';
-    if(diff) keySpan.style.color = 'var(--red)';
     keySpan.textContent = k;
+    var valSpan = document.createElement('span');
+    valSpan.className = 'row-val';
+    valSpan.textContent = va !== vb ? va + ' → ' + vb : va;
     row.appendChild(keySpan);
-
-    if(diff) {
-      var valSpan = document.createElement('span');
-      valSpan.style.cssText = 'flex:1;color:var(--red);word-break:break-all;';
-      valSpan.textContent = va + ' → ' + vb;
-      row.appendChild(valSpan);
-    } else {
-      var valSpan = document.createElement('span');
-      valSpan.className = 'parse-val';
-      valSpan.textContent = va;
-      row.appendChild(valSpan);
-    }
+    row.appendChild(valSpan);
     diffFrag.appendChild(row);
   });
 
@@ -1865,38 +1580,35 @@ function runDiff(){
 // Base64 tools
 function doEncode(){
   var txt=G('b64Input').value;
-  if(!txt){ toast('Nothing to encode','err'); return; }
+  if(!txt){ toast(t('m_nothing_encode'),'err'); return; }
   G('b64Output').value=toBase64(txt);
-  toast('Encoded','ok');
+  toast(t('m_encoded'),'ok');
 }
 function doDecode(){
   var txt=G('b64Input').value.trim();
-  if(!txt){ toast('Nothing to decode','err'); return; }
-  try{ G('b64Output').value=fromBase64(txt); toast('Decoded','ok'); }
-  catch(e){ toast('Invalid Base64','err'); }
+  if(!txt){ toast(t('m_nothing_decode'),'err'); return; }
+  try{ G('b64Output').value=fromBase64(txt); toast(t('m_decoded'),'ok'); }
+  catch(e){ toast(t('m_bad_b64'),'err'); }
 }
-function copyB64Out(){ safeClipboard(G('b64Output').value).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Copy failed','err'); }); }
+function copyB64Out(){ safeClipboard(G('b64Output').value).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); }); }
 
 // Remark renamer
 function runRenamer(){
   var lines=G('remarkInput').value.split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return x.startsWith('vless://'); });
-  if(!lines.length){ toast('No valid vless:// links found','err'); return; }
+  if(!lines.length){ toast(t('m_no_links'),'err'); return; }
   var tpl=G('remarkTpl').value.trim()||'{prefix}_{ip}_{idx}';
   var prefix=G('remarkPrefix').value.trim()||'Config';
   var out=lines.map(function(l,i){
-    try{
-      var u=new URL(l.replace(/^vless:\/\//,'https://'));
-      var p=new URLSearchParams(u.search);
-      var ip=u.hostname, sni=p.get('sni')||'', port=u.port||'443';
-      var remark=applyRemarkTpl(tpl,ip,sni,port,i+1,prefix);
-      return l.replace(/#[^#]*$/, '')+'#'+encodeURIComponent(remark);
-    }catch(e){ return l; }
+    var c=parseVless(l);
+    if(!c) return l;
+    var remark=applyRemarkTpl(tpl,c.address,c.sni,c.port,i+1,prefix);
+    return l.replace(/#[^#]*$/, '')+'#'+encodeURIComponent(remark);
   });
   G('remarkOutput').value=out.join('\n');
-  toast(out.length+(typeof t==='function'?t('toast_links_renamed'):' links renamed'),'ok');
+  toast(out.length+t('toast_links_renamed'),'ok');
 }
-function copyRenameOut(){ safeClipboard(G('remarkOutput').value).then(function(){ toast('Copied','ok'); }).catch(function(){ toast('Copy failed','err'); }); }
-function dlRenameOut(){ dlText('vless_renamed.txt',G('remarkOutput').value); toast('Downloaded','ok'); }
+function copyRenameOut(){ safeClipboard(G('remarkOutput').value).then(function(){ toast(t('copied'),'ok'); }).catch(function(){ toast(t('m_copy_failed'),'err'); }); }
+function dlRenameOut(){ dlText('vless_renamed.txt',G('remarkOutput').value); toast(t('toast_downloaded'),'ok'); }
 
 // ── Save-List Modal (replaces prompt() — works on Android) ──────
 let _pendingSaveField = null;
@@ -1904,27 +1616,27 @@ let _pendingSaveType  = null; // 'ip' | 'sni'
 
 function confirmSaveList() {
   var name = G('saveListLabelInput').value.trim();
-  if(!name) { toast('Enter a label','err'); return; }
+  if(!name) { toast(t('m_enter_label'),'err'); return; }
   var fieldId = _pendingSaveField;
   var type    = _pendingSaveType;
   closeSaveListModal();
   if(!fieldId || !type) return;
   var val = G(fieldId) ? G(fieldId).value.trim() : '';
-  if(!val) { toast('Field is empty','err'); return; }
+  if(!val) { toast(t('m_field_empty'),'err'); return; }
   if(type === 'ip') {
     var lists = lsGetArr('bc_iplists');
     var existing = lists.findIndex(function(l){ return l.name===name; });
     var entry = { name:name, ips:val, time:new Date().toLocaleString() };
     if(existing > -1) lists[existing] = entry; else lists.unshift(entry);
-    lsSet('bc_iplists',lists);
-    toast('IP list "'+name+'" saved','ok');
+    if(!lsSet('bc_iplists',lists)) return;
+    toast(tf('m_list_saved', { n: name }),'ok');
   } else {
     var lists2 = lsGetArr('bc_snilists');
     var existing2 = lists2.findIndex(function(l){ return l.name===name; });
     var entry2 = { name:name, snis:val, time:new Date().toLocaleString() };
     if(existing2 > -1) lists2[existing2] = entry2; else lists2.unshift(entry2);
-    lsSet('bc_snilists',lists2);
-    toast('SNI list "'+name+'" saved','ok');
+    if(!lsSet('bc_snilists',lists2)) return;
+    toast(tf('m_list_saved', { n: name }),'ok');
   }
 }
 function closeSaveListModal() {
@@ -1944,152 +1656,241 @@ hist = lsGetArr('bc_hist');
 // ══════════════════════════════════════════════════════════
 // CLASH EXPORT
 // ══════════════════════════════════════════════════════════
-function advDlClash() {
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to export','err'); return; }
-  var links = (G('aOut').dataset.plain || '').split('\n').filter(Boolean);
-  var proxies = links.map(function(l, i) {
-    try {
-      var u = new URL(l.replace(/^vless:\/\//, 'https://'));
-      var p = new URLSearchParams(u.search);
-      var name = decodeURIComponent(u.hash.slice(1) || ('VLESS-' + (i+1)));
-      var obj = {
-        name: name,
-        type: 'vless',
-        server: u.hostname,
-        port: parseInt(u.port || '443', 10),
-        uuid: u.username,
-        tls: (p.get('security') || 'tls') !== 'none',
-        'skip-cert-verify': (p.get('allowInsecure') || p.get('insecure')) === '1',
-        servername: p.get('sni') || '',
-        network: p.get('type') || 'tcp',
-        'client-fingerprint': p.get('fp') || 'chrome'
-      };
-      var net = p.get('type') || 'tcp';
-      if(net === 'ws') {
-        obj['ws-opts'] = {
-          path: p.get('path') || '/',
-          headers: { Host: p.get('host') || '' }
-        };
-      } else if(net === 'httpupgrade') {
-        obj['httpupgrade-opts'] = {
-          path: p.get('path') || '/',
-          host: p.get('host') || ''
-        };
-      } else if(net === 'splithttp' || net === 'xhttp') {
-        obj['splithttp-opts'] = {
-          path: p.get('path') || '/',
-          headers: { Host: p.get('host') || '' }
-        };
-      }
-      if(net === 'grpc') obj['grpc-opts'] = { 'grpc-service-name': p.get('serviceName') || '' };
-      var alpn = p.get('alpn') ? decodeURIComponent(p.get('alpn')).split(',') : [];
-      if(alpn.length) obj.alpn = alpn;
-      return obj;
-    } catch(e) { return null; }
-  }).filter(Boolean);
+// JSON strings are valid YAML double-quoted scalars, so this handles quotes,
+// backslashes, newlines and YAML-significant values such as *.example.com.
+function yamlStr(s) { return JSON.stringify(String(s)); }
 
-  var names = proxies.map(function(p){ return p.name; });
-  var yaml = '# Trace — Clash Meta config\n# Generated: ' + new Date().toLocaleString() + '\n\nproxies:\n';
-  yaml += proxies.map(function(pr) {
-    var lines = ['  - name: "' + pr.name + '"',
-      '    type: ' + pr.type,
-      '    server: ' + pr.server,
-      '    port: ' + pr.port,
-      '    uuid: ' + pr.uuid,
-      '    tls: ' + pr.tls,
-      '    skip-cert-verify: ' + pr['skip-cert-verify']];
-    if(pr.servername) lines.push('    servername: ' + pr.servername);
-    lines.push('    network: ' + pr.network);
-    if(pr['client-fingerprint']) lines.push('    client-fingerprint: ' + pr['client-fingerprint']);
-    if(pr['ws-opts']) {
-      lines.push('    ws-opts:');
-      lines.push('      path: "' + pr['ws-opts'].path + '"');
-      if(pr['ws-opts'].headers.Host) lines.push('      headers:\n        Host: ' + pr['ws-opts'].headers.Host);
-    }
-    if(pr['httpupgrade-opts']) {
-      lines.push('    httpupgrade-opts:');
-      lines.push('      path: "' + pr['httpupgrade-opts'].path + '"');
-      if(pr['httpupgrade-opts'].host) lines.push('      host: ' + pr['httpupgrade-opts'].host);
-    }
-    if(pr['splithttp-opts']) {
-      lines.push('    splithttp-opts:');
-      lines.push('      path: "' + pr['splithttp-opts'].path + '"');
-      if(pr['splithttp-opts'].headers && pr['splithttp-opts'].headers.Host) lines.push('      headers:\n        Host: ' + pr['splithttp-opts'].headers.Host);
-    }
-    if(pr['grpc-opts']) lines.push('    grpc-opts:\n      grpc-service-name: "' + pr['grpc-opts']['grpc-service-name'] + '"');
-    if(pr.alpn && pr.alpn.length) lines.push('    alpn: [' + pr.alpn.join(', ') + ']');
-    return lines.join('\n');
-  }).join('\n\n');
+// Clash and sing-box refuse configs containing duplicate names, and a remark template
+// without {idx} gives every link the same remark.
+function uniqueName(name, seen) {
+  var candidate = name, n = 2;
+  while(seen[candidate]) candidate = name + ' (' + (n++) + ')';
+  seen[candidate] = true;
+  return candidate;
+}
+function nameRegistry(reserved) {
+  var seen = Object.create(null);
+  reserved.forEach(function(n){ seen[n] = true; });
+  return seen;
+}
 
-  yaml += '\n\nproxy-groups:\n  - name: "Trace"\n    type: select\n    proxies:\n      - DIRECT\n';
-  yaml += names.map(function(n){ return '      - "' + n + '"'; }).join('\n');
-  yaml += '\n\nrules:\n  - MATCH,Trace\n';
+function clashProxyYaml(c, name) {
+  var tls = c.security !== 'none';
+  var network = c.type;
+  if(c.type === 'httpupgrade') network = 'ws';
+  if(c.type === 'splithttp') network = 'xhttp';
+  var lines = ['  - name: ' + yamlStr(name),
+    '    type: vless',
+    '    server: ' + yamlStr(c.address),
+    '    port: ' + parseInt(c.port, 10),
+    '    uuid: ' + yamlStr(c.uuid),
+    '    tls: ' + tls];
+  if(c.flow) lines.push('    flow: ' + yamlStr(c.flow));
+  if(c.encryption && c.encryption !== 'none') lines.push('    encryption: ' + yamlStr(c.encryption));
+  if(tls) {
+    lines.push('    skip-cert-verify: ' + c.insecure);
+    if(c.sni) lines.push('    servername: ' + yamlStr(c.sni));
+    lines.push('    client-fingerprint: ' + yamlStr(c.fp || 'chrome'));
+    if(c.alpn) lines.push('    alpn: [' + c.alpn.split(',').map(yamlStr).join(', ') + ']');
+  }
+  if(c.security === 'reality') {
+    lines.push('    reality-opts:');
+    lines.push('      public-key: ' + yamlStr(c.pbk));
+    if(c.sid) lines.push('      short-id: ' + yamlStr(c.sid));
+  }
+  lines.push('    network: ' + yamlStr(network));
+  if(network === 'ws') {
+    lines.push('    ws-opts:');
+    lines.push('      path: ' + yamlStr(c.path));
+    if(c.host) lines.push('      headers:\n        Host: ' + yamlStr(c.host));
+    if(c.type === 'httpupgrade') lines.push('      v2ray-http-upgrade: true');
+  } else if(network === 'xhttp') {
+    lines.push('    xhttp-opts:');
+    lines.push('      path: ' + yamlStr(c.path));
+    if(c.host) lines.push('      host: ' + yamlStr(c.host));
+    if(['stream-one','stream-up','packet-up'].indexOf(c.mode) > -1) lines.push('      mode: ' + yamlStr(c.mode));
+    var extra = {};
+    try { extra = JSON.parse(c.extra) || {}; } catch(e) {}
+    if(extra.xPaddingBytes) lines.push('      x-padding-bytes: ' + yamlStr(extra.xPaddingBytes));
+  } else if(network === 'grpc') {
+    lines.push('    grpc-opts:\n      grpc-service-name: ' + yamlStr(c.serviceName));
+  }
+  return lines.join('\n');
+}
 
-  dlText('clash_config.yaml', yaml);
-  toast('Clash YAML downloaded', 'ok');
+function clashText(links) {
+  var seen = nameRegistry(['DIRECT','REJECT','GLOBAL','Trace']);
+  var names = [];
+  var proxies = [];
+  links.forEach(function(l, i) {
+    var c = parseVless(l);
+    if(!c) return;
+    var name = uniqueName(c.remark || ('VLESS-' + (i+1)), seen);
+    names.push(name);
+    proxies.push(clashProxyYaml(c, name));
+  });
+
+  var yaml = '# Trace: Clash Meta config\n\nproxies:\n';
+  yaml += proxies.join('\n\n');
+
+  // A select group starts on its first entry: DIRECT goes last so the exported
+  // config proxies traffic unless the user chooses otherwise.
+  yaml += '\n\nproxy-groups:\n  - name: "Trace"\n    type: select\n    proxies:\n';
+  yaml += names.map(function(n){ return '      - ' + yamlStr(n); }).join('\n');
+  yaml += (names.length ? '\n' : '') + '      - DIRECT\n';
+  yaml += '\nrules:\n  - MATCH,Trace\n';
+  return yaml;
 }
 
 // ══════════════════════════════════════════════════════════
 // SING-BOX EXPORT
 // ══════════════════════════════════════════════════════════
-function advDlSingbox() {
-  if(G('aOut').classList.contains('empty')){ toast('Nothing to export','err'); return; }
-  var links = (G('aOut').dataset.plain || '').split('\n').filter(Boolean);
-  var outbounds = links.map(function(l, i) {
-    try {
-      var u = new URL(l.replace(/^vless:\/\//, 'https://'));
-      var p = new URLSearchParams(u.search);
-      var tag = decodeURIComponent(u.hash.slice(1) || ('vless-' + (i+1)));
-      var net = p.get('type') || 'tcp';
-      var sec = p.get('security') || 'tls';
-      var obj = {
-        type: 'vless',
-        tag: tag,
-        server: u.hostname,
-        server_port: parseInt(u.port || '443', 10),
-        uuid: u.username,
-        packet_encoding: 'xudp'
-      };
-      if(sec !== 'none') {
-        obj.tls = {
-          enabled: true,
-          insecure: (p.get('allowInsecure') || p.get('insecure')) === '1',
-          server_name: p.get('sni') || ''
-        };
-        var fp = p.get('fp');
-        if(fp) obj.tls.utls = { enabled: true, fingerprint: fp };
-        var alpn = p.get('alpn') ? decodeURIComponent(p.get('alpn')).split(',') : [];
-        if(alpn.length) obj.tls.alpn = alpn;
-      }
-      if(net === 'ws') {
-        obj.transport = { type: 'ws', path: p.get('path') || '/', headers: { Host: p.get('host') || '' } };
-      } else if(net === 'grpc') {
-        obj.transport = { type: 'grpc', service_name: p.get('serviceName') || '' };
-      } else if(net === 'httpupgrade' || net === 'splithttp' || net === 'xhttp') {
-        obj.transport = { type: 'http', path: p.get('path') || '/', headers: { Host: [p.get('host') || ''] } };
-      }
-      return obj;
-    } catch(e) { return null; }
-  }).filter(Boolean);
+// sing-box outbound for a parsed link, or null when sing-box has no such transport
+// (it doesn't implement xhttp/splithttp, and a substitute would fail to connect).
+function singboxOutbound(c, tag) {
+  if(c.type === 'xhttp' || c.type === 'splithttp') return null;
+  var obj = {
+    type: 'vless', tag: tag,
+    server: c.address, server_port: parseInt(c.port, 10),
+    uuid: c.uuid, packet_encoding: 'xudp'
+  };
+  if(c.flow) obj.flow = c.flow;
+  if(c.security === 'tls' || c.security === 'reality') {
+    obj.tls = {
+      enabled: true, server_name: c.sni || c.address, insecure: c.insecure,
+      utls: { enabled: true, fingerprint: c.fp || 'chrome' }
+    };
+    if(c.alpn) obj.tls.alpn = c.alpn.split(',');
+    if(c.security === 'reality') obj.tls.reality = { enabled: true, public_key: c.pbk, short_id: c.sid };
+  }
+  if(c.type === 'ws') {
+    obj.transport = { type: 'ws', path: c.path, headers: c.host ? { Host: c.host } : {} };
+  } else if(c.type === 'grpc') {
+    obj.transport = { type: 'grpc', service_name: c.serviceName };
+  } else if(c.type === 'httpupgrade') {
+    obj.transport = { type: 'httpupgrade', path: c.path, host: c.host };
+  } else if(c.q.headerType === 'http') {
+    obj.transport = { type: 'http', path: c.path, host: [c.host || c.address] };
+  }
+  return obj;
+}
+
+// Shared sing-box skeleton (1.13+: rule actions instead of the removed block outbound,
+// inbound sniff fields and geoip rules; typed DNS servers instead of address strings).
+function singboxConfig(logLevel, dnsStrategy, listenPort, outbounds, finalTag) {
+  return {
+    log: { level: logLevel, timestamp: true },
+    dns: {
+      servers: [
+        { type: 'https', tag: 'dns-cloudflare', server: '1.1.1.1' },
+        { type: 'https', tag: 'dns-google', server: '8.8.8.8' }
+      ],
+      strategy: dnsStrategy
+    },
+    inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: listenPort }],
+    outbounds: outbounds,
+    route: {
+      rules: [
+        { inbound: 'mixed-in', action: 'sniff' },
+        { ip_is_private: true, outbound: 'direct' }
+      ],
+      final: finalTag,
+      default_domain_resolver: { server: 'dns-cloudflare' }
+    }
+  };
+}
+
+function singboxText(links) {
+  var seen = nameRegistry(['select','auto','direct']);
+  var skipped = 0;
+  var outbounds = [];
+  links.forEach(function(l, i) {
+    var c = parseVless(l);
+    if(!c) return;
+    var outbound = singboxOutbound(c, '');
+    if(!outbound) { skipped++; return; }
+    outbound.tag = uniqueName(c.remark || ('vless-' + (i+1)), seen);
+    outbounds.push(outbound);
+  });
+  if(!outbounds.length) return { text: '', skipped: skipped };
 
   var tags = outbounds.map(function(o){ return o.tag; });
-  var config = {
-    log: { level: 'info', timestamp: true },
-    dns: { servers: [{ address: 'https://1.1.1.1/dns-query', strategy: 'prefer_ipv4' }] },
-    inbounds: [
-      { type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: 2080 }
-    ],
-    outbounds: outbounds.concat([
-      { type: 'selector', tag: 'select', outbounds: ['auto'].concat(tags) },
-      { type: 'urltest', tag: 'auto', outbounds: tags, url: 'https://www.gstatic.com/generate_204', interval: '3m' },
-      { type: 'direct', tag: 'direct' },
-      { type: 'block', tag: 'block' }
-    ]),
-    route: { rules: [{ outbound: 'direct', geoip: ['private'] }], final: 'select' }
-  };
+  var config = singboxConfig('info', 'prefer_ipv4', 2080, outbounds.concat([
+    { type: 'selector', tag: 'select', outbounds: ['auto'].concat(tags) },
+    { type: 'urltest', tag: 'auto', outbounds: tags, url: 'https://www.gstatic.com/generate_204', interval: '3m' },
+    { type: 'direct', tag: 'direct' }
+  ]), 'select');
+  return { text: JSON.stringify(config, null, 2), skipped: skipped };
+}
 
-  dlText('singbox_config.json', JSON.stringify(config, null, 2));
-  toast('Sing-box config downloaded', 'ok');
+function jsonText(links) {
+  return JSON.stringify(links.map(function(l){
+    var c = parseVless(l);
+    if(!c) return { raw: l };
+    return { uuid:c.uuid, address:c.address, port:parseInt(c.port, 10), security:c.security, sni:c.sni, fp:c.fp, alpn:c.alpn, pbk:c.pbk, sid:c.sid, spx:c.spx, flow:c.flow, type:c.type, host:c.host, path:c.path, remark:c.remark, raw:l };
+  }), null, 2);
+}
+
+// ── Export view ───────────────────────────────────────────
+let _fmt = 'clash';
+const _FORMATS = {
+  clash: { file: 'clash_config.yaml', build: clashText },
+  singbox: { file: 'singbox_config.json', build: function(l){ return singboxText(l).text; } },
+  links: { file: 'vless_configs.txt', build: function(l){ return l.join('\n'); } },
+  base64: { file: 'vless_configs_b64.txt', build: function(l){ return toBase64(l.join('\n')); } },
+  json: { file: 'vless_configs.json', build: jsonText }
+};
+
+// The links Export works on: the Build output, narrowed by its filter when one is set
+function exportLinks() {
+  return (G('aOut').dataset.plain || '').split('\n').filter(Boolean);
+}
+
+function _highlight(line) {
+  var safe = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return safe
+    .replace(/("(?:[^"\\]|\\.)*")(\s*:)?/g, function(m, str, colon){ return colon ? '<u>' + str + '</u>' + colon : '<em>' + str + '</em>'; })
+    .replace(/^(\s*-?\s*)([a-z-]+:)/, '$1<u>$2</u>');
+}
+
+function renderExport() {
+  var links = exportLinks();
+  var list = G('fmtList');
+  list.textContent = '';
+  Object.keys(_FORMATS).forEach(function(id) {
+    var b = document.createElement('button');
+    b.className = 'fmt' + (id === _fmt ? ' active' : '');
+    var name = document.createElement('b'); name.textContent = t('fmt_' + id);
+    var desc = document.createElement('small'); desc.textContent = t('fmt_' + id + '_d');
+    b.appendChild(name); b.appendChild(desc);
+    b.addEventListener('click', function(){ _fmt = id; renderExport(); updateRoute(); });
+    list.appendChild(b);
+  });
+  G('fmtName').textContent = _FORMATS[_fmt].file;
+  G('exportSub').textContent = links.length ? t('export_sub_n').replace('{n}', links.length) : t('export_empty');
+
+  G('fmtEmpty').hidden = !!links.length;
+  G('fmtShell').hidden = !links.length;
+  var code = G('fmtCode'), note = G('fmtNote');
+  var text = links.length ? _FORMATS[_fmt].build(links) : '';
+  code.innerHTML = text.split('\n').slice(0, 500).map(function(l){ return '<span class="ln">' + _highlight(l) + '</span>'; }).join('');
+  var skipped = _fmt === 'singbox' ? singboxText(links).skipped : 0;
+  note.classList.toggle('warn-text', !!skipped);
+  note.textContent = skipped ? t('toast_singbox_skipped').replace('{n}', skipped) : t('export_cred');
+}
+
+function exportDownload() {
+  var links = exportLinks();
+  var text = links.length ? _FORMATS[_fmt].build(links) : '';
+  if(!text) { toast(t('toast_nothing_export'), 'err'); return; }
+  dlText(_FORMATS[_fmt].file, text);
+  toast(t('toast_downloaded'), 'ok');
+}
+function exportCopy() {
+  var links = exportLinks();
+  var text = links.length ? _FORMATS[_fmt].build(links) : '';
+  if(!text) { toast(t('toast_nothing_copy'), 'err'); return; }
+  safeClipboard(text).then(function(){ flashCopied(G('exportCopyBtn')); }).catch(function(){ toast(t('m_copy_failed'),'err'); });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2100,6 +1901,7 @@ function bulkSwitchTab(name) {
     G('bt-'+n).classList.toggle('active', n===name);
     G('bp-'+n).classList.toggle('active', n===name);
   });
+  syncThumbs();
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2107,17 +1909,17 @@ function bulkSwitchTab(name) {
 // ══════════════════════════════════════════════════════════
 function decodeSub() {
   var raw = G('subInput').value.trim();
-  if(!raw){ toast('Paste a base64 string first', 'err'); return; }
+  if(!raw){ toast(t('m_paste_b64'), 'err'); return; }
   try {
     var decoded = fromBase64(raw);
     var links = decoded.split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return x.startsWith('vless://'); });
-    if(!links.length){ toast('No vless:// links found in decoded content', 'err'); return; }
+    if(!links.length){ toast(t('m_no_links'), 'err'); return; }
     var existing = G('bulkInput').value.trim();
     G('bulkInput').value = (existing ? existing + '\n' : '') + links.join('\n');
     bulkSwitchTab('links');
-    toast('Added ' + links.length + ' links to Links tab', 'ok');
+    toast(tf('m_added_links', { n: links.length }), 'ok');
   } catch(e) {
-    toast('Failed to decode — is this valid base64?', 'err');
+    toast(t('m_decode_failed'), 'err');
   }
 }
 
@@ -2126,12 +1928,12 @@ function decodeSub() {
 // ══════════════════════════════════════════════════════════
 async function fetchSubUrl() {
   var url = G('subUrlInput').value.trim();
-  if(!url){ toast('Enter a subscription URL', 'err'); return; }
+  if(!url){ toast(t('m_enter_url'), 'err'); return; }
   var statusEl = G('subUrlStatus');
   var btn = G('fetchSubBtn');
-  btn.textContent = typeof t==='function'?t('toast_fetching'):'⏳ Fetching...';
+  btn.textContent = t('toast_fetching');
   btn.disabled = true;
-  statusEl.textContent = typeof t==='function'?t('dyn_fetching_sub_status'):'Fetching subscription...';
+  statusEl.textContent = t('dyn_fetching_sub_status');
   statusEl.style.color = 'var(--muted)';
 
   var controller = new AbortController();
@@ -2143,9 +1945,9 @@ async function fetchSubUrl() {
     var text = await res.text();
     text = text.trim();
     if(text.length > 2_000_000) {
-      statusEl.textContent = '✕ Response too large (max 2 MB)';
+      statusEl.textContent = t('m_resp_large');
       statusEl.style.color = 'var(--red)';
-      toast('Subscription response too large', 'err');
+      toast(t('m_resp_large'), 'err');
       return;
     }
     // Try base64 decode first
@@ -2158,7 +1960,7 @@ async function fetchSubUrl() {
     if(!links.length) {
       links = text.split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return x.startsWith('vless://'); });
     }
-    if(!links.length){ statusEl.textContent = '✕ No vless:// links found in response'; statusEl.style.color='var(--red)'; return; }
+    if(!links.length){ statusEl.textContent = t('m_sub_empty'); statusEl.style.color='var(--red)'; return; }
     var existing = G('bulkInput').value.trim();
     var existingLinks2 = existing ? existing.split('\n').map(function(x){return x.trim();}).filter(Boolean) : [];
     var existingSet2 = {};
@@ -2166,17 +1968,17 @@ async function fetchSubUrl() {
     var newLinks2 = links.filter(function(l){ return !existingSet2[l.replace(/#[^#]*$/, '')]; });
     G('bulkInput').value = existingLinks2.concat(newLinks2).join('\n');
     bulkSwitchTab('links');
-    statusEl.textContent = '✓ Loaded ' + newLinks2.length + ' new links (' + (links.length - newLinks2.length) + ' duplicates skipped)';
+    statusEl.textContent = tf('m_loaded_new', { a: newLinks2.length, b: links.length - newLinks2.length });
     statusEl.style.color = 'var(--green)';
-    toast('Fetched ' + links.length + ' links', 'ok');
+    toast(tf('m_fetched', { n: links.length }), 'ok');
   } catch(e) {
-    var msg = e.name === 'AbortError' ? 'Timed out after 15s' : e.message;
-    statusEl.textContent = '✕ Fetch failed: ' + msg;
+    var msg = e.name === 'AbortError' ? t('m_timeout') : e.message;
+    statusEl.textContent = tf('m_fetch_status', { e: msg });
     statusEl.style.color = 'var(--red)';
-    toast('Fetch failed', 'err');
+    toast(t('m_fetch_failed'), 'err');
   } finally {
     clearTimeout(tid);
-    btn.textContent = typeof t==='function'?t('toast_fetch_decode_btn'):'🌐 Fetch & Decode';
+    btn.textContent = t('toast_fetch_decode_btn');
     btn.disabled = false;
   }
 }
@@ -2191,36 +1993,18 @@ function importSub() { decodeSub(); }
 // keystrokes on large IP/SNI lists don't call linesOf() on every character.
 // Checkbox changes (pair mode) fire immediately since they're instant clicks.
 let _liveCountTimer = null;
-let _simpleLiveCountTimer = null;
 
 function liveCount() {
   clearTimeout(_liveCountTimer);
   _liveCountTimer = setTimeout(_liveCountNow, 120);
 }
 function _liveCountNow() {
-  var ips  = G('a_ips')  ? linesOfExpanded('a_ips').length  : 0;  // ← was linesOf
-  var snis = G('a_snis') ? linesOf('a_snis').length : 0;
-  var el = G('a_liveCount');
-  if(!el) return;
-  if(!ips && !snis) { el.textContent = ''; return; }
-  var paired = G('a_pairMode') && G('a_pairMode').checked;
-  var total = paired ? Math.max(ips, snis) : (ips || 1) * (snis || 1);
-  el.textContent = ips + (typeof t==='function'?t('dyn_ips_x_snis'):' IPs × ') + (snis || 1) + (typeof t==='function'?t('dyn_snis_eq'):' SNIs = ') + total + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (total !== 1&&_currentLang==='en' ? 's' : '') + (paired ? (typeof t==='function'?t('dyn_paired'):' (paired)') : '');
-}
-
-function simpleLiveCount() {
-  clearTimeout(_simpleLiveCountTimer);
-  _simpleLiveCountTimer = setTimeout(_simpleLiveCountNow, 120);
-}
-function _simpleLiveCountNow() {
-  var ips = G('s_ip') ? linesOfExpanded('s_ip').length : 0;
-  var snis = G('s_sni') ? linesOf('s_sni').length : 0;
-  var el = G('s_liveCount');
-  if(!el) return;
-  if(!ips && !snis) { el.textContent = ''; return; }
-  var paired = G('s_pairMode') && G('s_pairMode').checked;
-  var total = paired ? Math.max(ips, snis) : (ips || 1) * (snis || 1);
-  el.textContent = ips + (typeof t==='function'?t('dyn_ips_x_snis'):' IPs × ') + (snis || 1) + (typeof t==='function'?t('dyn_snis_eq'):' SNIs = ') + total + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (total !== 1&&_currentLang==='en' ? 's' : '') + (paired ? (typeof t==='function'?t('dyn_paired'):' (paired)') : '');
+  var ips  = linesOfExpanded('a_ips').length;
+  var snis = linesOf('a_snis').length;
+  var paired = G('a_pairMode').checked;
+  var total = !ips ? 0 : paired ? Math.max(ips, snis) : ips * (snis || 1);
+  rollNumber(G('aCount'), total);
+  G('a_liveCount').textContent = ips + t('dyn_ips_x_snis') + (snis || 1) + t('dyn_snis_label') + (paired ? t('dyn_paired') : '');
 }
 
 // ════════════════════════════════════════════════════════
@@ -2228,9 +2012,9 @@ function _simpleLiveCountNow() {
 // ══════════════════════════════════════════════════════════
 function exportProfilesJSON() {
   var profiles = lsGetArr('bc_profiles');
-  if(!profiles.length){ toast('No profiles to export', 'err'); return; }
+  if(!profiles.length){ toast(t('m_no_profiles'), 'err'); return; }
   dlText('trace_profiles.json', JSON.stringify(profiles, null, 2));
-  toast('Profiles exported', 'ok');
+  toast(t('m_exported'), 'ok');
 }
 
 function importProfilesJSON(input) {
@@ -2245,7 +2029,7 @@ function importProfilesJSON(input) {
       var valid = imported.filter(function(p) {
         return p && typeof p === 'object' && typeof p.name === 'string' && p.name.trim() && typeof p.data === 'object' && p.data !== null;
       });
-      if(!valid.length) { toast('No valid profile entries found in file', 'err'); input.value = ''; return; }
+      if(!valid.length) { toast(t('m_bad_profiles'), 'err'); input.value = ''; return; }
       var existing = lsGetArr('bc_profiles');
       var merged = valid.concat(existing);
       // dedupe by name, imported wins
@@ -2255,11 +2039,11 @@ function importProfilesJSON(input) {
         seen[p.name] = true;
         return true;
       });
-      lsSet('bc_profiles', merged);
+      if(!lsSet('bc_profiles', merged)) { input.value = ''; return; }
       renderProfiles();
-      toast('Imported ' + valid.length + ' profile(s)' + (valid.length < imported.length ? ' (' + (imported.length - valid.length) + ' invalid skipped)' : ''), 'ok');
+      toast(valid.length < imported.length ? tf('m_imported_skip', { n: valid.length, s: imported.length - valid.length }) : tf('m_imported', { n: valid.length }), 'ok');
     } catch(ex) {
-      toast('Invalid profiles file', 'err');
+      toast(t('m_bad_profiles'), 'err');
     }
     input.value = '';
   };
@@ -2270,54 +2054,141 @@ function importProfilesJSON(input) {
 // KEYBOARD SHORTCUTS
 // ══════════════════════════════════════════════════════════
 document.addEventListener('keydown', function(e) {
-  if(e.ctrlKey && e.key === 'Enter') {
-    // Ctrl+Enter = generate in current mode
-    // Use getComputedStyle so we don't rely on inline style being set
-    var inSimple = G('pSimple') && getComputedStyle(G('pSimple')).display !== 'none';
-    var inAdv    = G('pAdv') && getComputedStyle(G('pAdv')).display !== 'none';
-    if(inSimple) { e.preventDefault(); simpleRegen(); }
-    else if(inAdv) { e.preventDefault(); advGen(); }
+  if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); return; }
+  if((e.ctrlKey || e.metaKey) && e.key === 'Enter' && G('tp-gen').classList.contains('active')) {
+    e.preventDefault();
+    advGen();
   }
   if(e.key === 'Escape') {
-    // Escape closes any open modal
     if(G('uuidModal').classList.contains('open')) closeUUIDModalDirect();
     if(G('profileModal').classList.contains('open')) closeProfileModalDirect();
-    if(G('ipModal') && G('ipModal').classList.contains('open')) closeIPModalDirect();
-    if(G('sniModal') && G('sniModal').classList.contains('open')) closeSNIModalDirect();
+    if(G('ipModal').classList.contains('open')) closeIPModalDirect();
+    if(G('sniModal').classList.contains('open')) closeSNIModalDirect();
+    if(G('saveListModal').classList.contains('open')) closeSaveListModal();
   }
 });
+
+// ── Command menu ──────────────────────────────────────────
+let _palIdx = 0;
+function _commands() {
+  return [
+    ['route_build', function(){ navTab('gen'); }],
+    ['route_check', function(){ navTab('check'); }],
+    ['route_export', function(){ navTab('export'); }],
+    ['route_library', function(){ navTab('library'); }],
+    ['btn_generate', function(){ navTab('gen'); advGen(); }],
+    ['cmd_theme', toggleTheme],
+    ['cmd_lang', toggleLang]
+  ];
+}
+function _paletteItems() {
+  var q = G('paletteInput').value.toLowerCase();
+  return _commands().filter(function(c){ return t(c[0]).toLowerCase().indexOf(q) > -1; });
+}
+function _renderPalette() {
+  var items = _paletteItems(), el = G('paletteList');
+  _palIdx = Math.min(_palIdx, Math.max(0, items.length - 1));
+  el.textContent = '';
+  items.forEach(function(c, i) {
+    var b = document.createElement('button');
+    b.className = 'pal-item' + (i === _palIdx ? ' on' : '');
+    b.textContent = t(c[0]);
+    b.addEventListener('click', function(){ G('palette').close(); c[1](); });
+    el.appendChild(b);
+  });
+}
+function openPalette() {
+  var d = G('palette');
+  if(d.open) return;
+  G('paletteInput').value = '';
+  _palIdx = 0;
+  _renderPalette();
+  d.showModal();
+  G('paletteInput').focus();
+}
+G('paletteInput').addEventListener('input', _renderPalette);
+G('paletteInput').addEventListener('keydown', function(e) {
+  var items = _paletteItems();
+  if(!items.length) return;
+  if(e.key === 'ArrowDown') { _palIdx = (_palIdx + 1) % items.length; _renderPalette(); e.preventDefault(); }
+  if(e.key === 'ArrowUp') { _palIdx = (_palIdx - 1 + items.length) % items.length; _renderPalette(); e.preventDefault(); }
+  if(e.key === 'Enter' && items[_palIdx]) { G('palette').close(); items[_palIdx][1](); }
+});
+G('palette').addEventListener('click', function(e){ if(e.target === G('palette')) G('palette').close(); });
+
+// ── Hold to clear ─────────────────────────────────────────
+// A hold is deliberate enough for the one action that removes everything, and the
+// toast still offers Undo afterwards.
+(function() {
+  var KEYS = ['bc_profiles','bc_uuids','bc_iplists','bc_snilists','bc_hist'];
+  var btn = G('holdClear'), timer = null;
+  function start() {
+    if(timer) return;
+    btn.classList.add('down');
+    timer = setTimeout(function() {
+      timer = null;
+      btn.classList.remove('down');
+      var previous = {}, prevHist = hist;
+      KEYS.forEach(function(k){ previous[k] = lsGetArr(k); lsSet(k, []); });
+      hist = [];
+      _refreshLibrary();
+      toast(t('toast_all_cleared'), 'ok', { label: t('undo'), run: function() {
+        KEYS.forEach(function(k){ lsSet(k, previous[k]); });
+        hist = prevHist;
+        _refreshLibrary();
+      } });
+    }, 1200);
+  }
+  function stop() {
+    clearTimeout(timer);
+    timer = null;
+    btn.classList.remove('down');
+  }
+  btn.addEventListener('pointerdown', start);
+  ['pointerup','pointerleave','pointercancel'].forEach(function(n){ btn.addEventListener(n, stop); });
+  btn.addEventListener('keydown', function(e){ if((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); start(); } });
+  btn.addEventListener('keyup', stop);
+  btn.addEventListener('blur', stop);
+})();
+function _refreshLibrary() {
+  renderProfiles(); renderUUIDs(); renderIPLists(); renderSNILists(); renderHist(); updateRoute();
+}
 
 // ══════════════════════════════════════════════════════════
 // DARK / LIGHT THEME
 // ══════════════════════════════════════════════════════════
 function toggleTheme() {
-  var isLight = document.body.classList.toggle('light');
-  G('themeToggle').textContent = isLight ? '🌙' : '☀';
-  lsSet('bc_theme', isLight ? 'light' : 'dark');
+  function flip() {
+    var isLight = document.body.classList.toggle('light');
+    lsSet('bc_theme', isLight ? 'light' : 'dark');
+  }
+  if(!document.startViewTransition || _calm() || document.hidden) { flip(); return; }
+  // The new theme spreads out from the button
+  var r = G('themeToggle').getBoundingClientRect();
+  var x = r.left + r.width / 2, y = r.top + r.height / 2;
+  var root = document.documentElement;
+  root.style.setProperty('--vt-x', x + 'px');
+  root.style.setProperty('--vt-y', y + 'px');
+  // End exactly at the farthest corner, so the whole duration is visible
+  root.style.setProperty('--vt-r', Math.ceil(Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y))) + 'px');
+  var vt = document.startViewTransition(flip);
+  // A skipped transition still applies the theme, so its rejection needs no handling
+  [vt.ready, vt.finished].forEach(function(p){ p.catch(function(){}); });
 }
 
-// Apply saved theme immediately on load (runs when script loads, body already exists)
+// An explicit choice wins; otherwise follow the system theme
 (function initTheme() {
   var saved = lsGet('bc_theme');
-  if(saved === 'light') {
-    document.body.classList.add('light');
-    // Set icon immediately to avoid flash — button already exists in DOM at this point
-    var btn = G('themeToggle');
-    if(btn) btn.textContent = '🌙';
-  }
+  var light = saved ? saved === 'light' : window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches;
+  document.body.classList.toggle('light', !!light);
 })();
-// Ensure theme button icon is correct after full load (catches any edge cases)
-window.addEventListener('load', function() {
-  var btn = G('themeToggle');
-  if(btn) btn.textContent = document.body.classList.contains('light') ? '🌙' : '☀';
-});
 
 // ══════════════════════════════════════════════════════════
 // PORT PRESETS
 // ══════════════════════════════════════════════════════════
 function setPort(p) {
   var el = G('a_port');
-  if(el) { el.value = p; liveCount(); toast('Port set to ' + p, 'ok'); }
+  if(el) { el.value = p; liveCount(); toast(tf('m_port_set', { p: p }), 'ok'); }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2357,7 +2228,7 @@ function sortAdvOut() {
 }
 
 function shuffleAdvOut() {
-  if(!_advRawLinks.length) { toast('Generate first', 'err'); return; }
+  if(!_advRawLinks.length) { toast(t('toast_generate_first'), 'err'); return; }
   var arr = _advRawLinks.slice();
   for(var i=arr.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var tmp=arr[i]; arr[i]=arr[j]; arr[j]=tmp; }
   // Shuffle mutates the canonical list so subsequent filter/sort work on shuffled order
@@ -2365,7 +2236,7 @@ function shuffleAdvOut() {
   // Reset sort dropdown so it doesn't imply a sorted order
   var s = G('aOutSort'); if(s) s.value = '';
   renderAdvOut(arr);
-  toast('Shuffled!', 'ok');
+  toast(t('m_shuffled'), 'ok');
 }
 
 function _resetAdvFilterSort() {
@@ -2379,13 +2250,13 @@ let _outRenderUnlocked = false; // set true when user clicks "Show all"; reset o
 function renderAdvOut(arr) {
   var aOut = G('aOut'); // NB10 fix: declare aOut so strict mode doesn't throw
   if(!arr.length) {
-    aOut.textContent = '';
+    aOut.textContent = t('adv_output_empty');
     aOut.classList.add('empty');
-    G('aBadge').textContent = '0 '+(typeof t==='function'?t('dyn_links'):'links');
+    G('aBadge').textContent = '0 '+t('dyn_links');
     return;
   }
   aOut.classList.remove('empty');
-  G('aBadge').textContent = arr.length + ' ' + (typeof t==='function'?t('dyn_link'):'link') + (arr.length !== 1&&_currentLang==='en' ? 's' : '');
+  G('aBadge').textContent = arr.length + ' ' + t('dyn_link') + (arr.length !== 1&&_currentLang==='en' ? 's' : '');
 
   // Always store full set for download/copy before applying render cap.
   // Use _advRawLinks as the authoritative source when no filter is active,
@@ -2406,7 +2277,7 @@ function renderAdvOut(arr) {
 
     var row = document.createElement('div');
     row.className = 'out-row';
-    row.title = 'Click to copy this link';
+    row.title = t('m_click_copy');
     row.dataset.link = link;
     row.addEventListener('click', function() { copySingleLink(this); });
 
@@ -2436,20 +2307,12 @@ function renderAdvOut(arr) {
 
   if(capped) {
     var cap = document.createElement('div');
-    cap.style.cssText = 'text-align:center;padding:12px 0;color:var(--muted);font-size:11px;border-top:1px solid rgba(255,255,255,0.06);margin-top:4px;';
-    var capText = document.createTextNode(
-      (typeof t==='function'?t('dyn_show_first'):'Showing first ') + _OUT_RENDER_LIMIT +
-      (typeof t==='function'?t('dyn_of_links'):' of ') + arr.length +
-      (typeof t==='function'?t('dyn_links_dot'):' links · ')
-    );
-    cap.appendChild(capText);
+    cap.className = 'out-more';
+    cap.appendChild(document.createTextNode(t('dyn_show_first') + _OUT_RENDER_LIMIT + t('dyn_of_links') + arr.length + ' '));
     var showAllBtn = document.createElement('span');
-    showAllBtn.style.cssText = 'color:var(--accent);cursor:pointer;';
-    showAllBtn.textContent = typeof t==='function'?t('dyn_show_all'):'Show all (may be slow)';
+    showAllBtn.textContent = t('dyn_show_all');
     showAllBtn.addEventListener('click', renderAdvOutFull);
     cap.appendChild(showAllBtn);
-    var capText2 = document.createTextNode(typeof t==='function'?t('dyn_use_dl'):' · Use ↓ TXT to get the full list');
-    cap.appendChild(capText2);
     frag.appendChild(cap);
   }
 
@@ -2470,8 +2333,8 @@ function copySingleLink(row) {
   safeClipboard(link).then(function(){
     row.classList.add('copied');
     setTimeout(function(){ row.classList.remove('copied'); }, 900);
-    toast('Copied!', 'ok');
-  }).catch(function(){ toast('Copy failed','err'); });
+    toast(t('copied'), 'ok');
+  }).catch(function(){ toast(t('m_copy_failed'),'err'); });
 }
 
 function getRemark(link) {
@@ -2492,8 +2355,8 @@ function getHost(link) {
 // In Tauri we call a Rust command `tcping` that does exactly this
 // via TcpStream::connect with a timeout.
 // If the Tauri command is unavailable (dev/browser mode) we fall
-// back to a WebSocket probe which gets us to the TCP layer before
-// the WS handshake fails, giving a good RTT approximation.
+// back to a WebSocket probe. Browsers have no raw sockets, so only
+// a completed WS connection confirms the host; see tcpingOnce.
 // ══════════════════════════════════════════════════════════
 let _pinging = false;
 
@@ -2541,20 +2404,20 @@ function safeClipboard(text) {
 async function runPing() {
   if(_pinging) return;
   var hosts = G('pingInput').value.split('\n').map(function(x){ return x.trim(); }).filter(Boolean);
-  if(!hosts.length) { toast('Add hosts to test', 'err'); return; }
+  if(!hosts.length) { toast(t('m_add_hosts'), 'err'); return; }
   var port    = parseInt(G('pingPort').value) || 443;
   var timeout = parseInt(G('pingTimeout').value) || 5000;
   var repeat  = parseInt(G('pingRepeat') ? G('pingRepeat').value : '3') || 3;
 
   _pinging = true;
-  G('pingBtn').textContent = typeof t==='function'?t('dyn_testing'):'⏳ Testing...';
+  G('pingBtn').textContent = t('dyn_testing');
   G('pingBtn').disabled = true;
   var el = G('pingResults');
   el.textContent = '';
   var progEl = document.createElement('div');
   progEl.className = 'ping-progress';
   progEl.id = 'pingProg';
-  progEl.textContent = 'Testing 0 / ' + hosts.length + '...';
+  progEl.textContent = _progress(0, hosts.length);
   el.appendChild(progEl);
 
   var results = new Array(hosts.length).fill(null);
@@ -2563,11 +2426,11 @@ async function runPing() {
 
   // Run hosts in parallel batches of CONCURRENCY
   async function pingWorker(idx) {
-    var prog = G('pingProg');
-    if(prog) prog.textContent = 'TCPing ' + (completed+1) + ' / ' + hosts.length + ' — ' + hosts[idx] + ':' + port;
     var res = await tcpingHost(hosts[idx], port, timeout, repeat);
     results[idx] = res;
     completed++;
+    var prog = G('pingProg');
+    if(prog) prog.textContent = _progress(completed, hosts.length);
     renderPingResults(results.filter(Boolean));
   }
 
@@ -2581,9 +2444,10 @@ async function runPing() {
       await Promise.all(batch);
     }
     var ok = results.filter(function(r){ return r && r.ok; }).length;
-    toast('TCPing done — ' + ok + '/' + hosts.length + ' reachable', 'ok');
+    var unsure = results.filter(function(r){ return r && r.inconclusive; }).length;
+    toast(tf(unsure ? 'm_test_done_u' : 'm_test_done', { a: ok, b: hosts.length, u: unsure }), 'ok');
   } finally {
-    G('pingBtn').textContent = typeof t==='function'?t('dyn_tcping_all_btn'):'⚡ TCPing All';
+    G('pingBtn').textContent = t('dyn_tcping_all_btn');
     G('pingBtn').disabled = false;
     _pinging = false;
     var prog2 = G('pingProg'); if(prog2) prog2.remove();
@@ -2592,45 +2456,56 @@ async function runPing() {
 
 // TCPing a host:port N times and return average RTT.
 // Mirrors v2rayN's GetTcpingTime: measure TCP SYN-ACK round-trip.
+// ok is only true for a confirmed connection. inconclusive means every probe that
+// finished ended in an error the browser won't explain, so its timing proves nothing.
 async function tcpingHost(host, port, timeout, repeat) {
-  var times = [];
+  // SSRF guard — covers both the Tauri path and the WS fallback
+  if(_isBlockedHost(host)) {
+    console.warn('tcpingHost: blocked private/loopback host', host);
+    return { host: host, ok: false, ms: 0, blocked: true };
+  }
+  var times = [], unconfirmed = [];
   for(var i = 0; i < repeat; i++) {
-    var ms = await tcpingOnce(host, port, timeout);
-    if(ms === null) {
+    var res = await tcpingOnce(host, port, timeout);
+    if(res === null) {
       // Probe failed — skip this sample and keep trying the remaining repeats.
       // We no longer bail on the first attempt: transient network blips (common
       // on mobile / VPN) would wrongly mark a reachable host as unreachable.
       continue;
     }
-    times.push(ms);
+    (res.confirmed ? times : unconfirmed).push(res.ms);
   }
-  if(!times.length) return { host: host, ok: false, ms: 0, timedOut: true };
-  var avg = Math.round(times.reduce(function(a,b){ return a+b; },0) / times.length);
-  var min = Math.min.apply(null, times);
-  return { host: host, ok: true, ms: avg, min: min, times: times };
+  var samples = times.length ? times : unconfirmed;
+  if(!samples.length) return { host: host, ok: false, ms: 0, timedOut: true };
+  var avg = Math.round(samples.reduce(function(a,b){ return a+b; },0) / samples.length);
+  var min = Math.min.apply(null, samples);
+  return { host: host, ok: !!times.length, inconclusive: !times.length, ms: avg, min: min, times: samples };
 }
 
-// Single TCP connect attempt. Returns RTT in ms or null on failure.
+// Result text for a host with no confirmed connection
+function pingFailLabel(r) {
+  if(r.blocked) return t('dyn_ping_blocked');
+  if(r.inconclusive) return '~' + r.ms + ' ms ' + t('dyn_unconfirmed');
+  return r.timedOut ? t('dyn_timeout_label') : t('dyn_unreachable');
+}
+
+// Single TCP connect attempt. Returns { ms, confirmed } or null on timeout.
+// confirmed means the connection really opened. A WebSocket error is NOT evidence of
+// reachability: browsers hide the cause, so a server rejecting the handshake looks the
+// same as a DNS failure or a refused connection.
 async function tcpingOnce(host, port, timeout) {
-  // ── SSRF guard — must run before BOTH the Tauri path and the WS fallback ──
-  if(_isBlockedHost(host)) {
-    console.warn('tcpingOnce: blocked private/loopback host', host);
-    return null;
-  }
   // ── Tauri path: call Rust tcping command (real TCP socket) ──
   // Uses _tauriInvoke cached at startup (handles both Tauri v1 and v2).
   if(_tauriInvoke) {
     try {
       var ms = await _tauriInvoke('tcping', { host: host, port: port, timeoutMs: timeout });
-      return typeof ms === 'number' ? ms : null;
+      return typeof ms === 'number' ? { ms: ms, confirmed: true } : null;
     } catch(e) {
       // Command failed — fall through to WebSocket probe
     }
   }
 
   // ── Fallback: WebSocket probe (browser / dev mode) ──
-  // Opening a WebSocket reaches the TCP layer before the WS handshake.
-  // The server will refuse/close the WS but we've already measured TCP RTT.
   return new Promise(function(resolve) {
     var start = Date.now();
     var done  = false;
@@ -2648,9 +2523,9 @@ async function tcpingOnce(host, port, timeout) {
       // connection conditions. Use ws:// for plain ports (80, 8080, etc.) —
       // a wss:// probe to a non-TLS port will always fail at TLS handshake,
       // making every non-TLS host appear unreachable.
-      // Full Cloudflare TLS port list: 443, 2053, 2082, 2083, 2087, 2095, 2096, 8443
-      var _tlsPort = (port === 443 || port === 8443 || port === 2053 || port === 2082 || port === 2083 || port === 2087 || port === 2095 || port === 2096);
-      ws = new WebSocket((_tlsPort ? 'wss' : 'ws') + '://' + host + ':' + port);
+      // Full Cloudflare TLS port list: 443, 2053, 2083, 2087, 2096, 8443
+      var _tlsPort = (port === 443 || port === 8443 || port === 2053 || port === 2083 || port === 2087 || port === 2096);
+      ws = new WebSocket((_tlsPort ? 'wss' : 'ws') + '://' + formatHost(host) + ':' + port);
     } catch(e) {
       clearTimeout(tid);
       resolve(null);
@@ -2663,23 +2538,16 @@ async function tcpingOnce(host, port, timeout) {
       done = true;
       clearTimeout(tid);
       ws.close();
-      resolve(Date.now() - start);
+      resolve({ ms: Date.now() - start, confirmed: true });
     };
 
-    // onerror fires when TCP connects but WS/TLS is rejected.
-    // We still record the elapsed time as an RTT approximation, but only if
-    // enough time has passed to rule out:
-    //  - Local refusals (< 5 ms): connection refused before hitting the network
-    //  - Fast TLS cert errors (< 50 ms): browser rejects cert client-side
-    //    without a real round-trip, producing a falsely low/fast RTT.
-    // Using 50 ms as the lower bound keeps legitimate fast connections (e.g.
-    // LAN) while discarding local-only errors.
+    // onerror fires for a rejected WS/TLS handshake, but also for DNS failures and
+    // refused connections, and the browser doesn't say which. Report it as unconfirmed.
     ws.onerror = function() {
       if(done) return;
       done = true;
       clearTimeout(tid);
-      var elapsed = Date.now() - start;
-      resolve(elapsed >= 50 ? elapsed : null);
+      resolve({ ms: Date.now() - start, confirmed: false });
     };
 
     // onclose after error — ignore, already resolved
@@ -2687,44 +2555,53 @@ async function tcpingOnce(host, port, timeout) {
   });
 }
 
+const _ICONS = {
+  ok: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
+  warn: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-dasharray="3 3.2"/></svg>',
+  bad: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+};
+function statusIcon(state) {
+  var s = document.createElement('span');
+  s.className = state;
+  s.innerHTML = _ICONS[state];
+  return s;
+}
+function _progress(done, total) { return t('progress_n').replace('{a}', done).replace('{b}', total); }
+function _pingState(r) { return r.ok ? 'ok' : r.inconclusive ? 'warn' : 'bad'; }
+
+// One result row. Rows that need explaining expand on click.
+function resultRow(r, title, sub, open, toggle) {
+  var state = _pingState(r);
+  var row = document.createElement(toggle ? 'button' : 'div');
+  row.className = 'result';
+  if(toggle) { row.setAttribute('aria-expanded', open ? 'true' : 'false'); row.addEventListener('click', toggle); }
+  row.appendChild(statusIcon(state));
+  var main = document.createElement('span');
+  main.style.minWidth = '0';
+  var b = document.createElement('b'); b.textContent = title;
+  main.appendChild(b);
+  if(sub) { var small = document.createElement('small'); small.textContent = sub; main.appendChild(small); }
+  row.appendChild(main);
+  var value = document.createElement('span');
+  value.className = 'st ' + state + (r.ok ? '' : ' txt');
+  value.textContent = r.ok ? r.ms + ' ms' : pingFailLabel(r);
+  row.appendChild(value);
+  return row;
+}
+
 function renderPingResults(results) {
   var el = G('pingResults');
   var prog = G('pingProg');
   var frag = document.createDocumentFragment();
   if(prog) frag.appendChild(prog.cloneNode(true));
-  results.forEach(function(r) {
-    var row = document.createElement('div');
-    row.className = 'ping-row';
-
-    var hostSpan = document.createElement('span');
-    hostSpan.className = 'ping-host';
-    hostSpan.textContent = r.host;
-    row.appendChild(hostSpan);
-
-    var msSpan = document.createElement('span');
-    if(r.ok) {
-      msSpan.className = 'ping-ms ' + (r.ms < 150 ? 'ping-ok' : r.ms < 400 ? 'ping-slow' : 'ping-bad');
-      msSpan.textContent = r.ms + ' ms avg';
-      if(r.times && r.times.length > 1) {
-        var sub = document.createElement('span');
-        sub.style.cssText = 'color:var(--muted);font-size:10px;';
-        sub.textContent = ' (' + r.times.join('/') + ' ms)';
-        msSpan.appendChild(sub);
-      }
-    } else {
-      msSpan.className = 'ping-ms ping-err';
-      msSpan.textContent = r.timedOut ? (typeof t==='function'?t('dyn_timeout_label'):'Timeout') : (typeof t==='function'?t('dyn_unreachable'):'Unreachable');
-    }
-    row.appendChild(msSpan);
-    frag.appendChild(row);
-  });
+  results.forEach(function(r) { frag.appendChild(resultRow(r, r.host)); });
   el.textContent = '';
   el.appendChild(frag);
 }
 function clearPing() {
   G('pingInput').value = '';
   G('pingResults').textContent = '';
-  toast('Cleared', 'ok');
+  toast(t('toast_cleared'), 'ok');
 }
 
 // ══════════════════════════════════════════════════════════
@@ -2736,9 +2613,9 @@ let _cfgPingResults = []; // store last results for export
 
 async function runCfgPing() {
   if(_cfgPinging) return;
-  if(G('cfgPingInput').value.length > 2_000_000) { toast('Input too large — max 2 MB', 'err'); return; }
+  if(G('cfgPingInput').value.length > 2_000_000) { toast(t('m_too_large_2'), 'err'); return; }
   var raw = G('cfgPingInput').value.split('\n').map(function(x){ return x.trim(); }).filter(function(x){ return x.startsWith('vless://'); });
-  if(!raw.length){ toast('Paste vless:// links first','err'); return; }
+  if(!raw.length){ toast(t('m_no_links'),'err'); return; }
 
   var timeout = parseInt(G('cfgPingTimeout').value) || 5000;
   var repeat  = parseInt(G('cfgPingRepeat').value) || 3;
@@ -2746,42 +2623,43 @@ async function runCfgPing() {
 
   // Parse each link into { remark, host, port, raw }
   var configs = raw.map(function(link) {
-    try {
-      var u = new URL(link.replace(/^vless:\/\//, 'https://'));
-      var remark = decodeURIComponent(u.hash.slice(1) || '') || (u.hostname + ':' + (u.port || '443'));
-      return { remark: remark, host: u.hostname, port: parseInt(u.port || '443', 10), raw: link };
-    } catch(e) { return null; }
+    var c = parseVless(link);
+    if(!c) return null;
+    return { remark: c.remark || (formatHost(c.address) + ':' + c.port), host: c.address, port: parseInt(c.port, 10), raw: link };
   }).filter(Boolean);
 
-  if(!configs.length){ toast('No valid vless:// links found','err'); return; }
+  if(!configs.length){ toast(t('m_no_links'),'err'); return; }
 
   _cfgPinging = true;
   _cfgPingResults = [];
-  G('cfgPingBtn').textContent = typeof t==='function'?t('dyn_testing'):'⏳ Testing...';
+  G('cfgPingBtn').textContent = t('dyn_testing');
   G('cfgPingBtn').disabled = true;
   var cfgEl0 = G('cfgPingResults');
   cfgEl0.textContent = '';
   var cfgProgEl = document.createElement('div');
   cfgProgEl.className = 'ping-progress';
   cfgProgEl.id = 'cfgPingProg';
-  cfgProgEl.textContent = 'Testing 0 / ' + configs.length + '...';
+  cfgProgEl.textContent = _progress(0, configs.length);
   cfgEl0.appendChild(cfgProgEl);
 
+  G('nt-check').classList.add('busy');
+  renderCfgPingResults(sortByMs);
   var CFG_CONCURRENCY = 8;
   var cfgCompleted = 0;
   var cfgResultsArr = new Array(configs.length).fill(null);
 
   async function cfgPingWorker(ci) {
     var cfg = configs[ci];
-    var prog = G('cfgPingProg');
-    if(prog) prog.textContent = 'TCPing ' + (cfgCompleted+1) + '/' + configs.length + ' — ' + cfg.remark;
     var res = await tcpingHost(cfg.host, cfg.port, timeout, repeat);
     cfgResultsArr[ci] = {
       remark: cfg.remark, host: cfg.host, port: cfg.port, raw: cfg.raw,
       ok: res.ok, ms: res.ms, min: res.min || res.ms,
-      times: res.times || [], timedOut: res.timedOut || false
+      times: res.times || [], timedOut: res.timedOut || false,
+      inconclusive: res.inconclusive || false, blocked: res.blocked || false
     };
     cfgCompleted++;
+    var prog = G('cfgPingProg');
+    if(prog) prog.textContent = _progress(cfgCompleted, configs.length);
     _cfgPingResults = cfgResultsArr.filter(Boolean);
     renderCfgPingResults(sortByMs);
   }
@@ -2795,142 +2673,180 @@ async function runCfgPing() {
       await Promise.all(cfgBatchArr);
     }
     var ok = _cfgPingResults.filter(function(r){ return r.ok; }).length;
-    toast('Done — ' + ok + '/' + configs.length + ' reachable', 'ok');
+    var unsure = _cfgPingResults.filter(function(r){ return r.inconclusive; }).length;
+    toast(tf(unsure ? 'm_test_done_u' : 'm_test_done', { a: ok, b: configs.length, u: unsure }), 'ok');
     // Final render with sort applied
     renderCfgPingResults(sortByMs);
   } finally {
-    G('cfgPingBtn').textContent = typeof t==='function'?t('dyn_tcping_configs_btn'):'⚡ TCPing Configs';
+    G('cfgPingBtn').textContent = t('dyn_tcping_configs_btn');
     G('cfgPingBtn').disabled = false;
     _cfgPinging = false;
     var prog2 = G('cfgPingProg'); if(prog2) prog2.remove();
+    G('nt-check').classList.remove('busy');
+    renderCfgPingResults(sortByMs); // final render, now the run is over
+    staggerIn(G('cfgPingResults').querySelectorAll('.result'));
+    document.querySelectorAll('.tally b').forEach(function(b){ var n = +b.textContent; b.textContent = '0'; rollNumber(b, n); });
   }
+}
+
+// Sort order: confirmed, then unconfirmed, then failed; fastest first within each
+function cfgPingCompare(a, b) {
+  function rank(r) { return r.ok ? 0 : r.inconclusive ? 1 : 2; }
+  return rank(a) - rank(b) || (rank(a) < 2 ? a.ms - b.ms : 0);
+}
+
+let _cfgOpen = null; // raw link of the expanded row
+
+// Latency map: every server is a tick on a real millisecond scale, and hosts with no
+// response sit in their own zone instead of being plotted as a fake time.
+function latencyMap(results, final) {
+  var count = function(state){ return results.filter(function(r){ return _pingState(r) === state; }).length; };
+  var top = Math.max.apply(null, results.map(function(r){ return r.ms; }).concat([400]));
+  var max = Math.ceil(top / 200) * 200, zone = 86;
+  var x = function(ms){ return ms / max * zone; };
+
+  var shell = document.createElement('div'); shell.className = 'shell';
+  var core = document.createElement('div'); core.className = 'core map';
+  var tally = document.createElement('div'); tally.className = 'tally';
+  [['ok','dyn_confirmed'],['warn','dyn_unconfirmed_cap'],['bad','dyn_timeout_label']].forEach(function(p) {
+    var item = document.createElement('span');
+    item.className = p[0];
+    item.innerHTML = _ICONS[p[0]];
+    var n = document.createElement('b'); n.textContent = count(p[0]);
+    item.appendChild(n);
+    item.appendChild(document.createTextNode(t(p[1])));
+    tally.appendChild(item);
+  });
+  core.appendChild(tally);
+
+  var scale = document.createElement('div');
+  scale.className = 'scale' + (final ? ' final' : '');
+  scale.setAttribute('aria-hidden', 'true');
+  var zoneEl = document.createElement('div'); zoneEl.className = 'void';
+  scale.appendChild(zoneEl);
+  if(!final) {
+    var sweep = document.createElement('div');
+    sweep.className = 'sweep';
+    // The map is redrawn after each result, so keep the sweep on one continuous clock
+    sweep.style.animationDelay = -(performance.now() % 1500) + 'ms';
+    scale.appendChild(sweep);
+  }
+  results.forEach(function(r, i) {
+    var tick = document.createElement('i'), state = _pingState(r);
+    tick.className = state;
+    var at = state === 'bad' ? 87 + (i * 7) % 12 : x(r.ms);
+    tick.style.left = at + '%';
+    tick.style.animationDelay = Math.round(at * 6) + 'ms'; // lands left to right, fastest first
+    scale.appendChild(tick);
+  });
+  core.appendChild(scale);
+
+  var axis = document.createElement('div');
+  axis.className = 'axis';
+  axis.setAttribute('aria-hidden', 'true');
+  [0, max/4, max/2, max*3/4, max].forEach(function(ms, i) {
+    var s = document.createElement('span');
+    s.style.left = x(ms) + '%';
+    s.textContent = i ? ms : '0 ms';
+    axis.appendChild(s);
+  });
+  var none = document.createElement('span');
+  none.style.left = '100%';
+  none.textContent = t('dyn_no_response');
+  axis.appendChild(none);
+  core.appendChild(axis);
+  shell.appendChild(core);
+  return shell;
 }
 
 function renderCfgPingResults(sortByMs) {
   var results = _cfgPingResults.slice();
-  if(sortByMs) {
-    results.sort(function(a,b){
-      if(!a.ok && !b.ok) return 0;
-      if(!a.ok) return 1;
-      if(!b.ok) return -1;
-      return a.ms - b.ms;
-    });
-  }
+  if(sortByMs) results.sort(cfgPingCompare);
 
   var el = G('cfgPingResults');
   var prog = G('cfgPingProg');
   var frag = document.createDocumentFragment();
   if(prog) frag.appendChild(prog.cloneNode(true));
 
+  if(prog) frag.appendChild(latencyMap(results, false));
+  else if(results.length) frag.appendChild(latencyMap(results, true));
+
   if(results.length) {
-    var ok = results.filter(function(r){ return r.ok; }).length;
-    var summary = document.createElement('div');
-    summary.style.cssText = 'font-size:11px;color:var(--muted);margin-bottom:8px;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;';
-    var summaryText = '✅ ' + ok + (typeof t==='function'?t('dyn_reachable_count'):' reachable') + ' · ❌ ' + (results.length - ok) + (typeof t==='function'?t('dyn_unreachable_count'):' unreachable');
-    if(ok > 0) {
-      var fastest = Math.min.apply(null, results.filter(function(r){ return r.ok; }).map(function(r){ return r.ms; }));
-      summaryText += ' · ' + (typeof t==='function'?t('dyn_fastest'):'fastest: ');
-      summary.textContent = summaryText;
-      var fastSpan = document.createElement('strong');
-      fastSpan.style.color = 'var(--green)';
-      fastSpan.textContent = fastest + ' ms';
-      summary.appendChild(fastSpan);
-    } else {
-      summary.textContent = summaryText;
-    }
-    frag.appendChild(summary);
-  }
-
-  results.forEach(function(r) {
-    var row = document.createElement('div');
-    row.className = 'ping-row';
-    row.style.cssText = 'flex-direction:column;align-items:flex-start;gap:2px;padding:7px 10px;';
-
-    var top = document.createElement('div');
-    top.style.cssText = 'display:flex;justify-content:space-between;width:100%;align-items:center;';
-
-    var remarkSpan = document.createElement('span');
-    remarkSpan.className = 'ping-host';
-    remarkSpan.style.cssText = 'font-weight:600;max-width:70%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    remarkSpan.title = r.remark;
-    remarkSpan.textContent = r.remark;
-
-    var msSpan = document.createElement('span');
-    if(r.ok) {
-      msSpan.className = 'ping-ms ' + (r.ms < 150 ? 'ping-ok' : r.ms < 400 ? 'ping-slow' : 'ping-bad');
-      msSpan.textContent = r.ms + ' ms';
-      if(r.times && r.times.length > 1) {
-        var sub = document.createElement('span');
-        sub.style.cssText = 'color:var(--muted);font-size:10px;';
-        sub.textContent = ' (' + r.times.join('/') + ')';
-        msSpan.appendChild(sub);
+    var list = document.createElement('div');
+    list.className = 'core results';
+    results.forEach(function(r) {
+      var open = _cfgOpen === r.raw;
+      list.appendChild(resultRow(r, r.remark, formatHost(r.host) + ':' + r.port, open, function() {
+        _cfgOpen = open ? null : r.raw;
+        renderCfgPingResults(sortByMs);
+      }));
+      if(open) {
+        var help = document.createElement('div');
+        help.className = 'result-help';
+        help.textContent = t(r.ok ? 'help_ok' : r.inconclusive ? 'dyn_unconfirmed_hint' : r.blocked ? 'help_blocked' : 'help_timeout');
+        list.appendChild(help);
       }
-    } else {
-      msSpan.className = 'ping-ms ping-err';
-      msSpan.textContent = r.timedOut ? (typeof t==='function'?t('dyn_timeout_label'):'Timeout') : (typeof t==='function'?t('dyn_unreachable'):'Unreachable');
-    }
-
-    top.appendChild(remarkSpan);
-    top.appendChild(msSpan);
-
-    var hostLine = document.createElement('span');
-    hostLine.style.cssText = 'font-size:10px;color:var(--muted);font-family:\'JetBrains Mono\',monospace;';
-    hostLine.textContent = r.host + ':' + r.port;
-
-    row.appendChild(top);
-    row.appendChild(hostLine);
-    frag.appendChild(row);
-  });
+    });
+    frag.appendChild(list);
+  }
 
   el.textContent = '';
   el.appendChild(frag);
+  G('cfgActions').hidden = !_cfgPingResults.length || _cfgPinging;
+  updateRoute();
 }
+
+// Moves the configs that responded into Export, confirmed ones first
+function cfgPingKeep() {
+  var usable = _cfgPingResults.filter(function(r){ return r.ok || r.inconclusive; }).sort(cfgPingCompare);
+  if(!usable.length) { toast(t('toast_nothing_export'), 'err'); return; }
+  _advRawLinks = usable.map(function(r){ return r.raw; });
+  _resetAdvFilterSort();
+  _outRenderUnlocked = false;
+  renderAdvOut(_advRawLinks);
+  aQrLinks = _advRawLinks.slice(); aQrCur = 0; updateAQr();
+  navTab('export');
+}
+
 // Load links from Advanced output panel
 function cfgPingFromOutput() {
   // Use _advRawLinks — the canonical source of truth (reflects sort/shuffle state)
   var links = _advRawLinks.filter(function(x){ return x.startsWith('vless://'); });
-  if(!links.length){ toast('No links in Advanced output — generate first','err'); return; }
+  if(!links.length){ toast(t('export_empty'),'err'); return; }
   G('cfgPingInput').value = links.join('\n');
-  toast('Loaded ' + links.length + ' configs', 'ok');
+  toast(tf('m_loaded_n', { n: links.length }), 'ok');
 }
 
 // Load links from Bulk input
 function cfgPingFromBulk() {
   var txt = G('bulkInput') ? G('bulkInput').value.trim() : '';
   var links = txt.split('\n').filter(function(x){ return x.trim().startsWith('vless://'); });
-  if(!links.length){ toast('No vless:// links in Bulk tab','err'); return; }
+  if(!links.length){ toast(t('m_no_links'),'err'); return; }
   G('cfgPingInput').value = links.join('\n');
-  toast('Loaded ' + links.length + ' configs', 'ok');
+  toast(tf('m_loaded_n', { n: links.length }), 'ok');
 }
 
-// Export configs that got a result, sorted fastest first, unreachable excluded
+// Export configs that got a response, confirmed ones first, timeouts excluded. Most VLESS
+// servers reject the browser's WebSocket probe, so dropping unconfirmed configs would
+// leave nothing to export; the toast says how many of them are unverified.
 function cfgPingExportFast() {
-  var ok = _cfgPingResults.filter(function(r){ return r.ok; });
-  if(!ok.length){ toast('No reachable configs to export','err'); return; }
-  ok.sort(function(a,b){ return a.ms - b.ms; });
-  dlText('fastest_configs.txt', ok.map(function(r){ return r.raw; }).join('\n'));
-  toast('Exported ' + ok.length + ' fastest configs', 'ok');
+  var usable = _cfgPingResults.filter(function(r){ return r.ok || r.inconclusive; });
+  if(!usable.length){ toast(t('m_none_reachable'),'err'); return; }
+  usable.sort(cfgPingCompare);
+  dlText('fastest_configs.txt', usable.map(function(r){ return r.raw; }).join('\n'));
+  var unsure = usable.filter(function(r){ return r.inconclusive; }).length;
+  toast(tf(unsure ? 'm_exported_nu' : 'm_exported_n', { n: usable.length, u: unsure }), 'ok');
 }
 
 function clearCfgPing() {
   G('cfgPingInput').value = '';
   G('cfgPingResults').textContent = '';
   _cfgPingResults = [];
-  toast('Cleared', 'ok');
+  G('cfgActions').hidden = true;
+  updateRoute();
+  toast(t('toast_cleared'), 'ok');
 }
 
-// ── Splash screen removal ─────────────────────────────────
-// Fades out and removes #appSplash once JS is ready and the UI is painted.
-// Safe to call even if no splash exists (guard checks for null).
-(function(){
-  var s = document.getElementById('appSplash');
-  if(s){
-    s.style.transition = 'opacity 0.25s';
-    s.style.opacity = '0';
-    setTimeout(function(){ if(s.parentNode) s.parentNode.removeChild(s); }, 260);
-  }
-})();
-// showToast removed — duplicate of toast(). CSS animations should be in style.css.
 // ══════════════════════════════════════════════════════════
 // BALANCER — Config Balancer Tool
 // ══════════════════════════════════════════════════════════
@@ -2947,83 +2863,58 @@ function clearCfgPing() {
 
   function balParseOne(link, idx) {
     try {
-      var clean = link.replace(/@@/g, '');
-      var url   = new URL(clean.replace(/^vless:\/\//i, 'http://'));
-      var p     = url.searchParams;
+      var c = parseVless(link.replace(/@@/g, ''));
+      if (!c) return null;
 
-      var network  = p.get('type')     || 'tcp';
-      var security = p.get('security') || 'none';
-      var sni      = p.get('sni')      || url.hostname;
-      var fp       = p.get('fp')       || 'chrome';
-      var alpn     = p.get('alpn')     ? p.get('alpn').split(',') : null;
-      var pbk      = p.get('pbk')      || '';
-      var sid      = p.get('sid')      || '';
-      var host     = p.get('host')     || '';
-      var path     = decodeURIComponent(p.get('path') || '/');
-      var mode     = p.get('mode')     || '';
-      var svcName  = p.get('serviceName') || '';
-      var flow     = p.get('flow')     || '';
-      var headerType = p.get('headerType') || '';
-      var port     = parseInt(url.port) || 443;
-      var address  = url.hostname;
-      var id       = url.username || '';
-      var remark   = url.hash ? decodeURIComponent(url.hash.slice(1)).trim() : 'Proxy-' + idx;
-      if (!remark) remark = 'Proxy-' + idx;
-
-      var icon = security === 'reality' ? '🔮' : security === 'tls' ? '🔒' : '🔓';
+      // splithttp is the former name of xhttp
+      var network  = c.type === 'splithttp' ? 'xhttp' : c.type;
+      var security = c.security;
+      var sni      = c.sni || c.address;
+      var fp       = c.fp  || 'chrome';
+      var alpn     = c.alpn ? c.alpn.split(',') : null;
+      var host     = c.host;
+      var path     = c.path;
+      var port     = parseInt(c.port, 10);
+      var address  = c.address;
+      var remark   = c.remark.trim() || 'Proxy-' + idx;
 
       // Xray outbound
       var xOut = {
         tag: 'proxy-' + idx,
         protocol: 'vless',
-        settings: { vnext: [{ address: address, port: port, users: [{ id: id, encryption: 'none', flow: flow }] }] },
+        settings: { vnext: [{ address: address, port: port, users: [{ id: c.uuid, encryption: c.encryption || 'none', flow: c.flow }] }] },
         streamSettings: { network: network, security: security }
       };
       if (network === 'ws') {
-        xOut.streamSettings.wsSettings = { path: path, headers: host ? { Host: host } : {} };
+        xOut.streamSettings.wsSettings = { path: path, host: host };
       } else if (network === 'grpc') {
-        xOut.streamSettings.grpcSettings = { serviceName: svcName, multiMode: mode === 'multi' };
-      } else if (network === 'xhttp' || network === 'httpupgrade') {
-        xOut.streamSettings.xhttpSettings = { path: path, host: host, mode: mode || 'auto' };
-      } else if (network === 'tcp' && headerType === 'http') {
+        xOut.streamSettings.grpcSettings = { serviceName: c.serviceName, multiMode: c.q.mode === 'multi' };
+      } else if (network === 'xhttp') {
+        xOut.streamSettings.xhttpSettings = { path: path, host: host, mode: c.mode || 'auto' };
+        try { if (c.extra) xOut.streamSettings.xhttpSettings.extra = JSON.parse(c.extra); } catch(e) {}
+      } else if (network === 'httpupgrade') {
+        xOut.streamSettings.httpupgradeSettings = { path: path, host: host };
+      } else if (network === 'tcp' && c.q.headerType === 'http') {
         xOut.streamSettings.tcpSettings = { header: { type: 'http', request: { path: [path], headers: { Host: [host || address] } } } };
       }
       if (security === 'tls') {
-        xOut.streamSettings.tlsSettings = { serverName: sni, fingerprint: fp, allowInsecure: false };
+        xOut.streamSettings.tlsSettings = { serverName: sni, fingerprint: fp, allowInsecure: c.insecure };
         if (alpn) xOut.streamSettings.tlsSettings.alpn = alpn;
       } else if (security === 'reality') {
-        xOut.streamSettings.realitySettings = { serverName: sni, fingerprint: fp, publicKey: pbk, shortId: sid, spiderX: p.get('spx') || '/' };
+        xOut.streamSettings.realitySettings = { serverName: sni, fingerprint: fp, publicKey: c.pbk, shortId: c.sid, spiderX: c.spx || '/' };
       }
 
-      // sing-box outbound
-      var sOut = {
-        type: 'vless', tag: 'proxy-' + idx,
-        server: address, server_port: port,
-        uuid: id, flow: flow, packet_encoding: 'xudp'
-      };
-      if (network === 'ws') {
-        sOut.transport = { type: 'ws', path: path, headers: host ? { Host: host } : {} };
-      } else if (network === 'grpc') {
-        sOut.transport = { type: 'grpc', service_name: svcName };
-      } else if (network === 'xhttp' || network === 'httpupgrade') {
-        sOut.transport = { type: 'http', path: path, host: host, method: 'GET' };
-      } else if (network === 'tcp' && headerType === 'http') {
-        sOut.transport = { type: 'http', path: path, headers: { Host: host || address } };
-      }
-      if (security === 'tls' || security === 'reality') {
-        sOut.tls = { enabled: true, server_name: sni, utls: { enabled: true, fingerprint: fp } };
-        if (alpn) sOut.tls.alpn = alpn;
-        if (security === 'reality') sOut.tls.reality = { enabled: true, public_key: pbk, short_id: sid };
-      }
+      // Xray refuses unencrypted VLESS to anything but private addresses
+      var plain = security === 'none' && (!c.encryption || c.encryption === 'none') && !_isBlockedHost(address);
 
-      return { xOut: xOut, sOut: sOut, remark: remark, address: address, port: port, network: network, security: security, icon: icon };
+      return { xOut: plain ? null : xOut, sOut: singboxOutbound(c, 'proxy-' + idx), remark: remark, address: address, port: port, network: network, security: security };
     } catch(e) { return null; }
   }
 
   // ── Live preview ─────────────────────────────────────────
   function balRenderPreview(nodes) {
     BAL_NODES = nodes;
-    G('balLiveCount').textContent = nodes.length + ' node' + (nodes.length !== 1 ? 's' : '');
+    G('balLiveCount').textContent = tf('m_nodes', { n: nodes.length });
     var prev = G('balNodeList');
     var wrap = G('balNodePreview');
     if (!nodes.length) { wrap.style.display = 'none'; return; }
@@ -3032,35 +2923,13 @@ function clearCfgPing() {
     prev.textContent = '';
     nodes.forEach(function(n) {
       var row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:8px;background:var(--card3);border:1px solid var(--border2);border-radius:8px;padding:7px 10px;';
-
-      var icon = document.createElement('span');
-      icon.style.fontSize = '1.1rem';
-      icon.textContent = n.icon;
-
-      var info = document.createElement('div');
-      info.style.cssText = 'flex:1;min-width:0;';
-
-      var remark = document.createElement('div');
-      remark.style.cssText = 'font-size:11px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+      row.className = 'node';
+      var remark = document.createElement('span');
       remark.textContent = n.remark;
-
-      var meta = document.createElement('div');
-      meta.style.cssText = 'font-size:10px;color:var(--muted);display:flex;gap:6px;margin-top:2px;';
-
-      var badge = document.createElement('span');
-      badge.style.cssText = 'background:var(--accent-lo);color:var(--accent);padding:1px 5px;border-radius:3px;';
-      badge.textContent = n.network.toUpperCase() + '/' + n.security.toUpperCase();
-
       var addr = document.createElement('span');
-      addr.textContent = n.address + ':' + n.port;
-
-      meta.appendChild(badge);
-      meta.appendChild(addr);
-      info.appendChild(remark);
-      info.appendChild(meta);
-      row.appendChild(icon);
-      row.appendChild(info);
+      addr.textContent = n.network + ' ' + formatHost(n.address) + ':' + n.port;
+      row.appendChild(remark);
+      row.appendChild(addr);
       prev.appendChild(row);
     });
   }
@@ -3096,19 +2965,12 @@ function clearCfgPing() {
   function balBuildSingBox(nodes, strategy, probeUrl, probeInterval, socksPort) {
     var outbounds = nodes.map(function(n) { return n.sOut; });
     outbounds.push({ type: 'direct', tag: 'direct' });
-    outbounds.push({ type: 'block',  tag: 'block'  });
     var tags = nodes.map(function(n) { return n.sOut.tag; });
     var balancer = strategy === 'leastPing'
       ? { type: 'urltest', tag: 'core_balancer', outbounds: tags, url: probeUrl, interval: probeInterval, tolerance: 300, idle_timeout: '30m' }
       : { type: 'selector', tag: 'core_balancer', outbounds: tags, default: tags[0] || 'direct' };
     outbounds.push(balancer);
-    return JSON.stringify({
-      log: { level: 'warning', timestamp: true },
-      dns: { servers: [{ address: 'https://1.1.1.1/dns-query', detour: 'direct' },{ address: 'https://8.8.8.8/dns-query', detour: 'direct' }], strategy: 'ipv4_only' },
-      inbounds: [{ type: 'mixed', tag: 'mixed-in', listen: '127.0.0.1', listen_port: socksPort, sniff: true, sniff_override_destination: true }],
-      outbounds: outbounds,
-      route: { rules: [{ ip_is_private: true, outbound: 'direct' },{ ip_cidr: ['geoip:cn'], outbound: 'direct' },{ domain: ['geosite:cn'], outbound: 'direct' }], final: 'core_balancer' }
-    }, null, 2);
+    return JSON.stringify(singboxConfig('warning', 'ipv4_only', socksPort, outbounds, 'core_balancer'), null, 2);
   }
 
   // ── Public API ───────────────────────────────────────────
@@ -3116,6 +2978,7 @@ function clearCfgPing() {
     BAL_FORMAT = mode;
     G('balFmtXray').classList.toggle('active', mode === 0);
     G('balFmtSing').classList.toggle('active', mode === 1);
+    syncThumbs();
     // Auto-regen if output already exists
     if (BAL_NODES.length && G('balOutput').value) window.balGenerate();
   };
@@ -3123,10 +2986,16 @@ function clearCfgPing() {
   window.balGenerate = function() {
     var raw = G('balInputNodes').value;
     var links = balExtract(raw);
-    if (!links.length) { toast('No vless:// links found', 'err'); return; }
+    if (!links.length) { toast(t('m_no_links'), 'err'); return; }
     var nodes = links.map(function(l, i) { return balParseOne(l, i + 1); }).filter(Boolean);
-    if (!nodes.length) { toast('Could not parse any node', 'err'); return; }
+    if (!nodes.length) { toast(t('m_no_nodes'), 'err'); return; }
     balRenderPreview(nodes);
+
+    var parsedCount = nodes.length;
+    var outKey = BAL_FORMAT === 1 ? 'sOut' : 'xOut';
+    nodes = nodes.filter(function(n) { return n[outKey]; });
+    if (!nodes.length) { toast(t(BAL_FORMAT === 1 ? 'toast_singbox_no_transport' : 'toast_xray_no_plain'), 'err'); return; }
+    var skipped = parsedCount - nodes.length;
 
     var strategy = G('balStrategy').value;
     var probeUrl  = G('balProbeUrl').value.trim();
@@ -3140,8 +3009,8 @@ function clearCfgPing() {
     G('balOutput').value = json;
     G('balOutWrap').style.display = 'block';
     var label = BAL_FORMAT === 0
-      ? 'Xray / v2rayNG JSON — ' + nodes.length + ' nodes — ' + (strategy === 'leastPing' ? 'LeastPing' : 'Selector')
-      : 'sing-box 1.13+ JSON — ' + nodes.length + ' nodes — ' + (strategy === 'leastPing' ? 'URLTest' : 'Selector');
+      ? 'Xray / v2rayNG · ' + tf('m_nodes', { n: nodes.length })
+      : 'sing-box 1.13+ · ' + tf('m_nodes', { n: nodes.length });
     G('balOutLabel').textContent = label;
     var st = G('balStatus');
     st.style.display = 'block';
@@ -3149,25 +3018,23 @@ function clearCfgPing() {
     var stBold = document.createElement('strong');
     stBold.textContent = nodes.length;
     var stStrat = document.createElement('span');
-    stStrat.style.color = 'var(--accent3)';
     stStrat.textContent = strategy === 'leastPing' ? 'LeastPing' : 'Selector';
-    st.appendChild(document.createTextNode('✅ '));
     st.appendChild(stBold);
-    st.appendChild(document.createTextNode(' nodes · ' + (BAL_FORMAT === 0 ? 'Xray' : 'sing-box 1.13+') + ' · '));
+    st.appendChild(document.createTextNode(' ' + t('m_nodes_word') + ' · ' + (BAL_FORMAT === 0 ? 'Xray' : 'sing-box 1.13+') + ' · '));
     st.appendChild(stStrat);
-    toast('Config generated — ' + nodes.length + ' nodes', 'ok');
+    toast(skipped ? t(BAL_FORMAT === 1 ? 'toast_singbox_skipped' : 'toast_xray_skipped').replace('{n}', skipped) : tf('m_generated_n', { n: nodes.length }), skipped ? 'err' : 'ok');
   };
 
   window.balCopyOut = function() {
     var v = G('balOutput').value;
-    if (!v) { toast('Nothing to copy', 'err'); return; }
+    if (!v) { toast(t('toast_nothing_copy'), 'err'); return; }
     // FIX IMPROVE: use safeClipboard() which handles Tauri and Android WebView fallbacks
-    safeClipboard(v).then(function() { toast('JSON copied!', 'ok'); }).catch(function() { toast('Copy failed', 'err'); });
+    safeClipboard(v).then(function() { toast(t('copied'), 'ok'); }).catch(function() { toast(t('m_copy_failed'), 'err'); });
   };
 
   window.balDownload = function() {
     var v = G('balOutput').value;
-    if (!v) { toast('Generate first', 'err'); return; }
+    if (!v) { toast(t('toast_generate_first'), 'err'); return; }
     // FIX IMPROVE: use dlText() which handles Telegram WebView's lack of download support
     var fn = (BAL_FORMAT === 0 ? 'xray' : 'singbox') + '-balancer-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-') + '.json';
     dlText(fn, v);
@@ -3179,9 +3046,9 @@ function clearCfgPing() {
     G('balOutWrap').style.display = 'none';
     G('balNodePreview').style.display = 'none';
     G('balStatus').style.display = 'none';
-    G('balLiveCount').textContent = '0 nodes';
+    G('balLiveCount').textContent = tf('m_nodes', { n: 0 });
     BAL_NODES = [];
-    toast('Cleared', 'ok');
+    toast(t('toast_cleared'), 'ok');
   };
 
   // ── Live input ───────────────────────────────────────────
@@ -3196,12 +3063,111 @@ function clearCfgPing() {
         balRenderPreview(links.map(function(l, i) { return balParseOne(l, i+1); }).filter(Boolean));
       }, 300);
     });
-    // Format button active style fix
-    [G('balFmtXray'), G('balFmtSing')].forEach(function(btn) {
-      if (btn) btn.addEventListener('click', function() {
-        [G('balFmtXray'), G('balFmtSing')].forEach(function(b){ if(b) b.style.background=''; });
-      });
-    });
   });
 
 })();
+
+// ── Motion ────────────────────────────────────────────────
+function _calm() { return window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches; }
+
+// One shared highlight per group, which slides to the active item
+function syncThumbs() {
+  document.querySelectorAll('.route, .seg, .subtabs').forEach(function(box) {
+    if(!box.offsetWidth) return;
+    var on = box.querySelector('.active');
+    var thumb = box.querySelector(':scope > .thumb');
+    if(!thumb) {
+      thumb = document.createElement('i');
+      thumb.className = 'thumb';
+      box.insertBefore(thumb, box.firstChild);
+    }
+    thumb.style.opacity = on ? '1' : '0';
+    if(!on) return;
+    var line = box.classList.contains('subtabs');
+    thumb.style.width = on.offsetWidth + 'px';
+    thumb.style.height = (line ? 2 : on.offsetHeight) + 'px';
+    thumb.style.transform = 'translate(' + on.offsetLeft + 'px,' + (line ? on.offsetTop + on.offsetHeight - 2 : on.offsetTop) + 'px)';
+    if(!thumb.classList.contains('ready')) requestAnimationFrame(function(){ thumb.classList.add('ready'); });
+  });
+}
+
+// Panels enter from the direction of travel, and a signal runs along the trace line
+function routeMotion(name, from, at) {
+  var rtl = document.documentElement.dir === 'rtl' ? -1 : 1;
+  G('tp-'+name).style.setProperty('--from', ((at >= from ? 1 : -1) * rtl * 14) + 'px');
+  if(at <= from || at > 2) return;
+  [at > 1 && from < 2 ? 'link2' : '', at >= 1 && from < 1 ? 'link1' : ''].forEach(function(id) {
+    if(!id) return;
+    var link = G(id);
+    link.classList.remove('pulse');
+    void link.offsetWidth;
+    link.classList.add('pulse');
+  });
+}
+
+function rollNumber(el, to) {
+  var from = parseInt((el.textContent || '0').replace(/\D/g, ''), 10) || 0;
+  cancelAnimationFrame(el._roll);
+  if(from === to || _calm() || document.hidden) { el.textContent = to.toLocaleString('en'); return; }
+  var start = performance.now();
+  function step(now) {
+    var p = Math.min(1, (now - start) / 300), eased = 1 - Math.pow(1 - p, 3);
+    el.textContent = Math.round(from + (to - from) * eased).toLocaleString('en');
+    if(p < 1) el._roll = requestAnimationFrame(step);
+  }
+  el._roll = requestAnimationFrame(step);
+}
+
+// Rows arrive in sequence. Only the first screenful, so long lists never feel slow.
+function staggerIn(rows) {
+  Array.prototype.slice.call(rows, 0, 12).forEach(function(row, i) {
+    row.style.animationDelay = (i * 32) + 'ms';
+    row.classList.remove('fresh');
+    void row.offsetWidth;
+    row.classList.add('fresh');
+  });
+}
+
+function once(el, cls, ms) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+  setTimeout(function(){ el.classList.remove(cls); }, ms);
+}
+
+function flashCopied(btn) {
+  if(btn._flash) clearTimeout(btn._flash);
+  else btn._label = btn.textContent;
+  btn.textContent = t('copied');
+  once(btn, 'swap', 260);
+  btn._flash = setTimeout(function() {
+    btn.textContent = btn._label;
+    btn._flash = null;
+    once(btn, 'swap', 260);
+  }, 1400);
+}
+
+// A soft light follows the pointer along panel edges
+(function() {
+  if(!window.matchMedia || !matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  var pending = null;
+  document.addEventListener('pointermove', function(e) {
+    var shell = e.target.closest && e.target.closest('.shell');
+    if(!shell || pending) return;
+    pending = requestAnimationFrame(function() {
+      pending = null;
+      var r = shell.getBoundingClientRect();
+      shell.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+      shell.style.setProperty('--my', (e.clientY - r.top) + 'px');
+    });
+  }, { passive: true });
+})();
+
+window.addEventListener('resize', syncThumbs);
+if(document.fonts && document.fonts.ready) document.fonts.ready.then(syncThumbs);
+
+// ── Start ─────────────────────────────────────────────────
+_liveCountNow();
+updateRoute();
+syncThumbs();
+_pasteHint();

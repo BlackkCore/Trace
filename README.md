@@ -1,17 +1,18 @@
 <div align="center">
 
-<img src="./logo.svg" alt="Trace" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/logo-dark.svg">
+  <img src="./assets/logo-light.svg" alt="Trace" width="300">
+</picture>
 
-**A client-side VLESS proxy configuration suite.**
+**Build, check and export VLESS configs in your browser.**
 
-Generate · Parse · Validate · TCPing — all in your browser.
+No backend · No sign-up · Nothing leaves your device
 
-[![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red?style=flat-square)](./README.md#license)
-[![HTML](https://img.shields.io/badge/HTML-19%25-orange?style=flat-square&logo=html5&logoColor=white)](https://github.com/BlackkCore/Trace)
-[![JavaScript](https://img.shields.io/badge/JavaScript-65%25-yellow?style=flat-square&logo=javascript&logoColor=black)](https://github.com/BlackkCore/Trace)
-[![CSS](https://img.shields.io/badge/CSS-16%25-blue?style=flat-square&logo=css3&logoColor=white)](https://github.com/BlackkCore/Trace)
-[![No Backend](https://img.shields.io/badge/backend-none-brightgreen?style=flat-square)](#privacy)
-[![Bilingual](https://img.shields.io/badge/i18n-EN%20%2F%20FA-blueviolet?style=flat-square)](#)
+[![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red?style=flat-square)](#-license)
+[![No Backend](https://img.shields.io/badge/backend-none-brightgreen?style=flat-square)](#-privacy)
+[![No Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)](#-file-structure)
+[![Bilingual](https://img.shields.io/badge/i18n-EN%20%2F%20FA-blueviolet?style=flat-square)](#-فارسی)
 
 [🇬🇧 English](#-english) · [🇮🇷 فارسی](#-فارسی)
 
@@ -21,7 +22,7 @@ Generate · Parse · Validate · TCPing — all in your browser.
 
 ## 🇬🇧 English
 
-**Trace** is a fully client-side web app for generating, parsing, managing, and testing VLESS proxy configurations. No backend, no sign-up, no tracking — everything runs in your browser.
+**Trace** is a fully client-side web app for building, checking and exporting VLESS proxy configurations. Everything runs in your browser, in English or Persian, with dark and light themes.
 
 > Built by [@Blackkcore](https://t.me/Blackkcore)
 
@@ -29,7 +30,7 @@ Generate · Parse · Validate · TCPing — all in your browser.
 
 ### 🚀 Quick Start
 
-Trace is a static site — no build step, no dependencies to install.
+Trace is a static site, with no build step and nothing to install.
 
 **Run locally:**
 ```bash
@@ -40,76 +41,78 @@ start index.html       # Windows
 xdg-open index.html    # Linux
 ```
 
-**Deploy in one click:**
+**Deploy:**
 
 | Platform | Steps |
 |---|---|
 | **GitHub Pages** | Fork → Settings → Pages → `main` branch `/root` |
-| **Netlify / Vercel / Cloudflare Pages** | Drop the 5 files — zero config needed |
+| **Netlify / Vercel / Cloudflare Pages** | Drop the whole folder, including `fonts/` and `assets/`. No configuration needed |
 
 ---
 
 ### ✨ Features
 
-<details>
-<summary><b>⚡ Generate</b></summary>
+Trace follows one route: **Build → Check → Export**, with a **Library** for everything you save. Press `Ctrl K` to jump anywhere from the command palette.
 
-- **Simple Mode** — paste any `vless://` link to auto-load its fields, tweak, and re-export in seconds
-- **Advanced Mode** — full control: UUID, port, TLS, transport (`xhttp`, `ws`, `grpc`, `splithttp`, `tcp`), fingerprint, flow, Reality settings
-- **Batch Generation** — provide multiple IPs or SNIs (one per line); supports IP ranges (`1.2.3.1–50`) and CIDR (`104.16.0.0/24`)
-- **Pair Mode** — full matrix (every IP × every SNI) or strict 1-to-1 pairing
-- **Export Formats** — `vless://` links, `.txt` download, Clash YAML, or QR code
-- **Saved Profiles** — save generator settings as named profiles and reload instantly
+<details open>
+<summary><b>⚡ Build</b></summary>
 
-</details>
-
-<details>
-<summary><b>📁 Profiles</b></summary>
-
-- Save, search, load, edit, and delete named configuration profiles
-- Export all profiles to JSON / import from JSON for backup or sharing
+- **Paste anything** — a `vless://` link loads into the form and is split into its parts, many links open in Check, and base64 text or a subscription URL is recognized
+- **One form** — UUID, port, TLS, transport, plus fingerprint, flow and Reality settings when you need them
+- **Batch generation** — multiple IPs or SNIs, one per line, with IP ranges (`1.2.3.1-50`) and CIDR (`104.16.0.0/24`)
+- **Pair mode** — full matrix (every IP × every SNI) or strict 1-to-1 pairing
+- **Large lists** — tens of thousands of links stay responsive; the page shows the first 500 and exports all of them
+- **QR codes** for any generated link
 
 </details>
 
 <details>
-<summary><b>📥 Bulk Import</b></summary>
+<summary><b>🔍 Check</b></summary>
 
-- Accepts raw `vless://` links, base64-encoded subscription strings, or a subscription URL
-- Automatic deduplication across all input methods
-- Export results as `.txt` or base64-encoded
-
-</details>
-
-<details>
-<summary><b>🔧 Tools</b></summary>
-
-| Tool | What it does |
+| Section | What it does |
 |---|---|
-| **Config Validator** | Instant health check — UUID format, port range, required fields, TLS params |
-| **TCPing** | Measures raw TCP SYN-ACK RTT to any list of IPs/hosts |
-| **Config TCPing** | Pings each `vless://` config's `host:port` and sorts by RTT; export the fastest |
-| **Config Balancer** | Generates load-balanced JSON for **v2rayNG (Xray)** or **sing-box 1.13+** |
-| **Config Diff** | Side-by-side comparison of two `vless://` links, highlighting every differing field |
-| **Base64 Encoder/Decoder** | Encode or decode subscription strings |
-| **Bulk Remark Renamer** | Apply a template (`{prefix}_{ip}_{sni}_{idx}`) to rename remarks in bulk |
+| **Servers** | Probes each config's `host:port` and sorts confirmed configs first; keep the ones that responded |
+| **Import** | Accepts raw `vless://` links, base64 subscription strings or a subscription URL, and removes duplicates |
+| **Hosts** | Probes any list of IPs or hosts |
+| **Validate** | Instant health check of UUID, port, required fields and TLS settings, with a warning for unencrypted links |
+| **Compare** | Side-by-side comparison of two `vless://` links, field by field |
+
+Browsers can't tell a rejected connection from a failed one, so only a completed connection counts as *confirmed*. Anything else shows as *unconfirmed*, never as reachable.
 
 </details>
 
 <details>
-<summary><b>🗄 Saved Data</b></summary>
+<summary><b>📦 Export</b></summary>
 
-- **UUID Manager** — generate, nickname, and store UUIDs; pick from any UUID field with one click
-- **IP Lists** — save named IP lists, load into any IP field instantly
-- **SNI Lists** — same for SNI sets
+| Section | What it does |
+|---|---|
+| **Formats** | Clash YAML, sing-box JSON, plain links, base64 subscription or JSON, to copy or download |
+| **Balancer** | Load-balanced JSON for **v2rayNG (Xray)** or **sing-box 1.13+** |
+| **Rename** | Rename remarks in bulk with a template such as `{prefix}_{ip}_{sni}_{idx}` |
+
+Some configs can't run on every client, so Trace leaves them out and tells you how many:
+- sing-box has no `xhttp` / `splithttp` support
+- Xray refuses unencrypted VLESS to public servers
 
 </details>
 
 <details>
-<summary><b>🌍 Other</b></summary>
+<summary><b>🗄 Library</b></summary>
 
-- Dark / Light theme toggle
-- Persian (FA) / English language switch (full i18n via `i18n.js`)
-- All data stored locally in `localStorage` — nothing ever leaves your device
+- **Profiles** — save, search, load and edit named settings, and back them up as JSON
+- **UUIDs** — generate, nickname and store UUIDs, and pick one from any UUID field
+- **IP and SNI lists** — save named lists and load them into any field
+- **History** — return to your recent generations
+- **Safe deleting** — deletes can be undone, and clearing everything takes a full press and hold
+
+</details>
+
+<details>
+<summary><b>🌍 Persian support</b></summary>
+
+- Full English and Persian interface with right-to-left layout
+- Dates shown in the Persian (Jalali) calendar when Persian is selected
+- Fonts are bundled, so nothing loads from a third party
 
 </details>
 
@@ -120,7 +123,7 @@ xdg-open index.html    # Linux
 | Field | Values |
 |---|---|
 | Security | `tls` · `reality` · `none` |
-| Transport | `xhttp` · `ws` · `grpc` · `splithttp` · `tcp` |
+| Transport | `xhttp` · `ws` · `grpc` · `splithttp` · `httpupgrade` · `tcp` |
 | Fingerprint | `chrome` · `firefox` · `safari` · `ios` · `android` · `edge` · `360` · `qq` · `random` · `randomized` |
 | Flow | `xtls-rprx-vision` · none |
 | TLS ALPN | `h2` · `http/1.1` · custom |
@@ -131,23 +134,26 @@ xdg-open index.html    # Linux
 
 ```
 Trace/
-├── index.html       # App shell — all tabs and UI
+├── index.html       # App shell and all screens
 ├── renderer.js      # All logic: generation, parsing, tools, storage
-├── style.css        # Themes, layout, components
-├── i18n.js          # English / Persian translation strings
-└── qrcode.min.js    # QR code generation (bundled, no CDN dependency)
+├── style.css        # Themes, layout, components, motion
+├── i18n.js          # English and Persian strings
+├── qrcode.min.js    # QR code generation (bundled, no CDN)
+├── logo.svg         # App icon
+├── assets/          # Logo files, app icons, social preview
+└── fonts/           # Geist and Vazirmatn (SIL Open Font License, bundled)
 ```
 
 ---
 
 ### 🔒 Privacy
 
-All processing happens in the browser. No data is sent to any server.
+All processing happens in the browser, and your data stays in `localStorage` on your device. No data is sent to any Trace server, because there isn't one.
 
 The only outbound requests are:
-- **TCPing / Config TCPing** — TCP connections to hosts *you* enter, from *your* browser
-- **Subscription URL fetch** — an HTTP GET to the URL you provide in Bulk Import
-- **Config Balancer probe** — only if you actually run the generated config in your proxy client
+- **Server and host checks** — connections to hosts *you* enter, from *your* browser
+- **Subscription URL fetch** — an HTTP GET to the URL you provide in Import
+- **Balancer probe** — only if you run the generated config in your proxy client
 
 ---
 
@@ -162,7 +168,7 @@ Personal, non-commercial use only. Copying, modifying, redistributing, or embedd
 
 ## 🇮🇷 فارسی
 
-**Trace** یک وب‌اپلیکیشن کاملاً سمت کلاینت برای ساخت، تجزیه، مدیریت و تست کانفیگ‌های VLESS است. بدون سرور، بدون ثبت‌نام، بدون ردیابی — همه چیز در مرورگر شما اجرا می‌شود.
+**Trace** یک وب‌اپلیکیشن کاملاً سمت کلاینت برای ساخت، بررسی و خروجی گرفتن از کانفیگ‌های VLESS است. همه چیز در مرورگر شما اجرا می‌شود، به فارسی یا انگلیسی و با تم تاریک و روشن.
 
 > ساخته‌شده توسط [@Blackkcore](https://t.me/Blackkcore)
 
@@ -170,7 +176,7 @@ Personal, non-commercial use only. Copying, modifying, redistributing, or embedd
 
 ### 🚀 شروع سریع
 
-Trace یک سایت استاتیک است — نیازی به build یا نصب وابستگی نیست.
+Trace یک سایت استاتیک است و به build یا نصب چیزی نیاز ندارد.
 
 **اجرای محلی:**
 ```bash
@@ -181,76 +187,78 @@ start index.html       # Windows
 xdg-open index.html    # Linux
 ```
 
-**استقرار با یک کلیک:**
+**استقرار:**
 
 | پلتفرم | مراحل |
 |---|---|
 | **GitHub Pages** | Fork → Settings → Pages → شاخه `main`، `/root` |
-| **Netlify / Vercel / Cloudflare Pages** | پنج فایل را آپلود کنید — بدون هیچ تنظیمی |
+| **Netlify / Vercel / Cloudflare Pages** | کل پوشه را همراه با `fonts/` و `assets/` آپلود کنید. به هیچ تنظیمی نیاز نیست |
 
 ---
 
 ### ✨ امکانات
 
-<details>
-<summary><b>⚡ تولید کانفیگ</b></summary>
+Trace یک مسیر ساده دارد: **ساخت ← بررسی ← خروجی**، به‌علاوه **کتابخانه** برای هر چیزی که ذخیره می‌کنید. با `Ctrl K` از پالت دستورات به هر بخش بروید.
 
-- **حالت ساده** — هر لینک `vless://` را paste کنید، ویرایش کنید و در چند ثانیه خروجی بگیرید
-- **حالت پیشرفته** — کنترل کامل: UUID، پورت، TLS، نوع ترانسپورت، fingerprint، flow، تنظیمات Reality
-- **تولید دسته‌ای** — چند IP یا SNI وارد کنید؛ پشتیبانی از رنج IP و CIDR
-- **حالت Pair** — ماتریس کامل یا یک‌به‌یک
-- **فرمت‌های خروجی** — لینک `vless://`، دانلود `.txt`، Clash YAML، یا QR کد
-- **پروفایل‌های ذخیره‌شده** — تنظیمات generator را به‌عنوان پروفایل ذخیره و بارگذاری کنید
+<details open>
+<summary><b>⚡ ساخت</b></summary>
 
-</details>
-
-<details>
-<summary><b>📁 پروفایل‌ها</b></summary>
-
-- ذخیره، جستجو، بارگذاری، ویرایش و حذف پروفایل‌های نام‌دار
-- خروجی / ورودی JSON برای پشتیبان‌گیری یا اشتراک‌گذاری
+- **جای‌گذاری هر ورودی** — لینک `vless://` در فرم بارگذاری و به اجزایش تقسیم می‌شود، چند لینک در بخش بررسی باز می‌شوند و base64 یا URL اشتراک شناسایی می‌شود
+- **یک فرم** — UUID، پورت، TLS، ترانسپورت، و در صورت نیاز fingerprint، flow و تنظیمات Reality
+- **تولید دسته‌ای** — چند IP یا SNI در هر خط، با پشتیبانی از رنج IP (`1.2.3.1-50`) و CIDR (`104.16.0.0/24`)
+- **حالت Pair** — ماتریس کامل یا جفت‌سازی یک‌به‌یک
+- **لیست‌های بزرگ** — ده‌ها هزار لینک بدون کندی؛ صفحه ۵۰۰ مورد اول را نشان می‌دهد و خروجی شامل همه آن‌هاست
+- **QR کد** برای هر لینک تولیدشده
 
 </details>
 
 <details>
-<summary><b>📥 ورودی دسته‌ای</b></summary>
+<summary><b>🔍 بررسی</b></summary>
 
-- دریافت لینک‌های خام `vless://`، رشته‌های base64 یا URL اشتراک
-- حذف خودکار موارد تکراری
-- خروجی به‌صورت `.txt` یا base64
-
-</details>
-
-<details>
-<summary><b>🔧 ابزارها</b></summary>
-
-| ابزار | کاربرد |
+| بخش | کاربرد |
 |---|---|
-| **Config Validator** | بررسی فوری سلامت کانفیگ — UUID، پورت، فیلدهای لازم، TLS |
-| **TCPing** | اندازه‌گیری RTT به لیستی از IP/host |
-| **Config TCPing** | TCPing روی هر کانفیگ و مرتب‌سازی بر اساس RTT |
-| **Config Balancer** | تولید کانفیگ JSON با load-balancing برای v2rayNG یا sing-box |
-| **Config Diff** | مقایسه دو لینک `vless://` فیلد به فیلد |
-| **Base64 Encoder/Decoder** | رمزگذاری و رمزگشایی رشته‌های اشتراک |
-| **Bulk Remark Renamer** | تغییر نام remark کانفیگ‌ها به‌صورت دسته‌ای با قالب دلخواه |
+| **سرورها** | پروب `host:port` هر کانفیگ و نمایش کانفیگ‌های تأییدشده در ابتدای لیست |
+| **ورودی** | دریافت لینک‌های خام `vless://`، رشته‌های base64 یا URL اشتراک، با حذف موارد تکراری |
+| **هاست‌ها** | پروب هر لیستی از IP یا host |
+| **اعتبارسنجی** | بررسی فوری UUID، پورت، فیلدهای لازم و تنظیمات TLS، با هشدار برای لینک‌های بدون رمزنگاری |
+| **مقایسه** | مقایسه دو لینک `vless://` فیلد به فیلد |
+
+مرورگر نمی‌تواند اتصال ردشده را از اتصال ناموفق تشخیص دهد، پس فقط اتصال کامل‌شده *تأییدشده* حساب می‌شود. بقیه موارد *تأییدنشده* نمایش داده می‌شوند و هرگز در دسترس اعلام نمی‌شوند.
 
 </details>
 
 <details>
-<summary><b>🗄 داده‌های ذخیره‌شده</b></summary>
+<summary><b>📦 خروجی</b></summary>
 
-- **UUID Manager** — تولید، نام‌گذاری و ذخیره UUID
-- **لیست IP** — ذخیره و بارگذاری فوری در هر فیلد IP
-- **لیست SNI** — همان قابلیت برای SNI
+| بخش | کاربرد |
+|---|---|
+| **فرمت‌ها** | Clash YAML، JSON برای sing-box، لینک ساده، اشتراک base64 یا JSON، با امکان کپی یا دانلود |
+| **بالانسر** | تولید JSON با load-balancing برای **v2rayNG (Xray)** یا **sing-box 1.13+** |
+| **تغییر نام** | تغییر نام دسته‌ای remark با قالبی مانند `{prefix}_{ip}_{sni}_{idx}` |
+
+بعضی کانفیگ‌ها روی همه کلاینت‌ها اجرا نمی‌شوند، بنابراین Trace آن‌ها را کنار می‌گذارد و تعدادشان را به شما می‌گوید:
+- sing-box از `xhttp` و `splithttp` پشتیبانی نمی‌کند
+- Xray کانفیگ VLESS بدون رمزنگاری را برای سرورهای عمومی نمی‌پذیرد
 
 </details>
 
 <details>
-<summary><b>🌍 سایر امکانات</b></summary>
+<summary><b>🗄 کتابخانه</b></summary>
 
-- تغییر تم تاریک / روشن
-- تغییر زبان فارسی / انگلیسی (i18n کامل)
-- تمام داده‌ها در `localStorage` ذخیره می‌شوند — هیچ چیز دستگاه شما را ترک نمی‌کند
+- **پروفایل‌ها** — ذخیره، جستجو، بارگذاری و ویرایش تنظیمات نام‌دار، با پشتیبان‌گیری JSON
+- **UUID** — تولید، نام‌گذاری و ذخیره UUID و انتخاب آن از هر فیلد UUID
+- **لیست IP و SNI** — ذخیره لیست‌های نام‌دار و بارگذاری در هر فیلد
+- **تاریخچه** — بازگشت به تولیدهای اخیر
+- **حذف امن** — حذف قابل بازگردانی است و پاک کردن همه چیز نیاز به نگه داشتن کامل دکمه دارد
+
+</details>
+
+<details>
+<summary><b>🌍 پشتیبانی از فارسی</b></summary>
+
+- رابط کامل فارسی و انگلیسی با چیدمان راست‌به‌چپ
+- نمایش تاریخ‌ها با تقویم شمسی در حالت فارسی
+- فونت‌ها همراه برنامه هستند و چیزی از سرویس‌های دیگر بارگذاری نمی‌شود
 
 </details>
 
@@ -261,7 +269,7 @@ xdg-open index.html    # Linux
 | فیلد | مقادیر |
 |---|---|
 | Security | `tls` · `reality` · `none` |
-| Transport | `xhttp` · `ws` · `grpc` · `splithttp` · `tcp` |
+| Transport | `xhttp` · `ws` · `grpc` · `splithttp` · `httpupgrade` · `tcp` |
 | Fingerprint | `chrome` · `firefox` · `safari` · `ios` · `android` · `edge` · `360` · `qq` · `random` · `randomized` |
 | Flow | `xtls-rprx-vision` · none |
 | TLS ALPN | `h2` · `http/1.1` · سفارشی |
@@ -272,23 +280,26 @@ xdg-open index.html    # Linux
 
 ```
 Trace/
-├── index.html       # پوسته اپ — تمام تب‌ها و رابط کاربری
+├── index.html       # پوسته اپ و تمام صفحه‌ها
 ├── renderer.js      # تمام منطق: تولید، تجزیه، ابزارها، ذخیره‌سازی
-├── style.css        # تم‌ها، چیدمان، کامپوننت‌ها
-├── i18n.js          # رشته‌های ترجمه فارسی / انگلیسی
-└── qrcode.min.js    # تولید QR کد (بدون وابستگی CDN)
+├── style.css        # تم‌ها، چیدمان، کامپوننت‌ها، انیمیشن
+├── i18n.js          # رشته‌های فارسی و انگلیسی
+├── qrcode.min.js    # تولید QR کد (بدون CDN)
+├── logo.svg         # آیکون برنامه
+├── assets/          # فایل‌های لوگو، آیکون‌ها، تصویر پیش‌نمایش
+└── fonts/           # فونت‌های Geist و Vazirmatn (مجوز SIL Open Font)
 ```
 
 ---
 
 ### 🔒 حریم خصوصی
 
-تمام پردازش‌ها در مرورگر انجام می‌شود. هیچ داده‌ای به هیچ سروری ارسال نمی‌شود.
+تمام پردازش‌ها در مرورگر انجام می‌شود و داده‌های شما در `localStorage` روی دستگاه خودتان می‌ماند. هیچ داده‌ای به سرور Trace ارسال نمی‌شود، چون چنین سروری وجود ندارد.
 
 تنها درخواست‌های خارجی:
-- **TCPing / Config TCPing** — اتصالات TCP به hostهایی که شما وارد می‌کنید
-- **دریافت URL اشتراک** — یک HTTP GET به URL‌ای که شما وارد می‌کنید
-- **URL probe بالانسر** — فقط اگر کانفیگ تولیدشده را در کلاینت پروکسی اجرا کنید
+- **بررسی سرور و هاست** — اتصال به hostهایی که شما وارد می‌کنید، از مرورگر خودتان
+- **دریافت URL اشتراک** — یک HTTP GET به URL‌ای که در بخش ورودی وارد می‌کنید
+- **probe بالانسر** — فقط اگر کانفیگ تولیدشده را در کلاینت پروکسی اجرا کنید
 
 ---
 
