@@ -24,7 +24,7 @@ No backend · No sign-up · Nothing leaves your device
 
 **Trace** is a fully client-side web app for building, checking and exporting VLESS proxy configurations. Everything runs in your browser, in English or Persian, with dark and light themes.
 
-> Built by [@Blackkcore](https://t.me/Blackkcore)
+> Built by [@zekk4](https://t.me/zekk4)
 
 ---
 
@@ -159,7 +159,7 @@ The only outbound requests are:
 
 ### 📄 License
 
-© [@Blackkcore](https://t.me/Blackkcore) — All rights reserved.
+© [@zekk4](https://t.me/zekk4) — All rights reserved.
 
 Personal, non-commercial use only. Copying, modifying, redistributing, or embedding this code in other projects requires explicit written permission from the author.
 
@@ -170,7 +170,7 @@ Personal, non-commercial use only. Copying, modifying, redistributing, or embedd
 
 **Trace** یک وب‌اپلیکیشن کاملاً سمت کلاینت برای ساخت، بررسی و خروجی گرفتن از کانفیگ‌های VLESS است. همه چیز در مرورگر شما اجرا می‌شود، به فارسی یا انگلیسی و با تم تاریک و روشن.
 
-> ساخته‌شده توسط [@Blackkcore](https://t.me/Blackkcore)
+> ساخته‌شده توسط [@zekk4](https://t.me/zekk4)
 
 ---
 
@@ -305,6 +305,6 @@ Trace/
 
 ### 📄 مجوز
 
-© [@Blackkcore](https://t.me/Blackkcore) — تمام حقوق محفوظ است.
+© [@zekk4](https://t.me/zekk4) — تمام حقوق محفوظ است.
 
 استفاده شخصی و غیرتجاری مجاز است. کپی، تغییر، توزیع مجدد یا استفاده در پروژه‌های دیگر بدون اجازه کتبی صریح از نویسنده مجاز نیست.

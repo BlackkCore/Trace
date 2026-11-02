@@ -9,7 +9,7 @@ var _translations = {
     // Header
     header_tag: 'PROXY CONFIGURATION SUITE',
     header_sub: 'Generate · Parse · Manage · Profile VLESS configurations',
-    header_creator: 'Created by <a href="https://t.me/Blackkcore" target="_blank" rel="noopener">@Blackkcore</a> · All rights reserved',
+    header_creator: 'Created by <a href="https://t.me/zekk4" target="_blank" rel="noopener">@zekk4</a> · All rights reserved',
 
     // Nav tabs
     tab_generate: 'Generate',
@@ -633,7 +633,7 @@ var _translations = {
     // Header
     header_tag: 'مجموعه تنظیمات پروکسی',
     header_sub: 'تولید · تجزیه · مدیریت · پروفایل تنظیمات VLESS',
-    header_creator: 'ساخته شده توسط <a href="https://t.me/Blackkcore" target="_blank" rel="noopener">@Blackkcore</a> · تمامی حقوق محفوظ است',
+    header_creator: 'ساخته شده توسط <a href="https://t.me/zekk4" target="_blank" rel="noopener">@zekk4</a> · تمامی حقوق محفوظ است',
 
     // Nav tabs
     tab_generate: 'تولید',
