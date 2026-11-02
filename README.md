@@ -9,6 +9,8 @@
 
 No backend · No sign-up · Nothing leaves your device
 
+**[Open Trace](https://blackkcore.github.io/Trace/)**
+
 [![License](https://img.shields.io/badge/license-All%20Rights%20Reserved-red?style=flat-square)](#-license)
 [![No Backend](https://img.shields.io/badge/backend-none-brightgreen?style=flat-square)](#-privacy)
 [![No Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen?style=flat-square)](#-file-structure)
@@ -31,6 +33,8 @@ No backend · No sign-up · Nothing leaves your device
 ### 🚀 Quick Start
 
 Trace is a static site, with no build step and nothing to install.
+
+**Use it online:** [blackkcore.github.io/Trace](https://blackkcore.github.io/Trace/)
 
 **Run locally:**
 ```bash
@@ -177,6 +181,8 @@ Personal, non-commercial use only. Copying, modifying, redistributing, or embedd
 ### 🚀 شروع سریع
 
 Trace یک سایت استاتیک است و به build یا نصب چیزی نیاز ندارد.
+
+**استفاده آنلاین:** [blackkcore.github.io/Trace](https://blackkcore.github.io/Trace/)
 
 **اجرای محلی:**
 ```bash
